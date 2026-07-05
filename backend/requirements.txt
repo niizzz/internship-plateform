@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+python-multipart
+playwright
+anthropic
+python-docx
+pypdf
+pdf2docx
+httpx
+pydantic-settings
