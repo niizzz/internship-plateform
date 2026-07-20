@@ -10,6 +10,8 @@ frontend/dist/
 # Personal data — never commit these
 backend/data/
 backend/storage/
+backend/debug_banks/
+backend/debug_lazard/
 
 # Misc
 *.log

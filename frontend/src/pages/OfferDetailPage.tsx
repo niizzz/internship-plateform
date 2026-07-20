@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api, ApplicationStatus, STATUS_LABEL, TailorResult, DocSource, CATEGORY_COLOR } from '../api'
 import StatusBadge from '../components/StatusBadge'
+import OfferDescription from '../components/OfferDescription'
 
 const STATUSES: ApplicationStatus[] = ['not_applied', 'applied', 'online_assessment', 'interview', 'offer', 'rejected']
 
@@ -100,8 +101,9 @@ export default function OfferDetailPage() {
         </div>
 
         {offer.description && (
-          <div className="relative mt-4 text-sm text-slate-300 whitespace-pre-wrap border-t border-ink-700 pt-4">
-            {offer.description}
+          <div className="relative mt-4 border-t border-ink-700 pt-4">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-mono mb-3">Job description</div>
+            <OfferDescription text={offer.description} />
           </div>
         )}
       </section>
@@ -197,7 +199,7 @@ export default function OfferDetailPage() {
           onClick={() => applyAssist.mutate()}
           disabled={applyAssist.isPending}
           className="btn-neon px-3 py-1.5 rounded-md bg-neon-cyan text-ink-950 text-sm font-semibold hover:bg-cyan-300 disabled:opacity-50">
-          {applyAssist.isPending ? 'Launching…' : 'Apply with pre-fill assist →'}
+          {applyAssist.isPending ? 'Preparing documents & launching… (first time ~1-2 min)' : 'Apply with pre-fill assist →'}
         </button>
         {assistMsg && <div className="mt-2 text-xs text-slate-300 font-mono">{assistMsg}</div>}
       </section>

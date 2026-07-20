@@ -36,6 +36,30 @@ def ensure_docx(input_path: Path, work_dir: Path) -> Path:
     return out
 
 
+def docx_to_pdf(docx_path: Path, pdf_path: Path) -> Path:
+    """Convert DOCX to PDF via Word COM (banks' ATSes want PDFs).
+
+    Safe to call from worker threads (per-call COM init). Requires MS Word.
+    """
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        try:
+            doc = word.Documents.Open(str(docx_path.resolve()), ReadOnly=True)
+            # 17 = wdExportFormatPDF
+            doc.ExportAsFixedFormat(OutputFileName=str(pdf_path.resolve()), ExportFormat=17)
+            doc.Close(False)
+        finally:
+            word.Quit()
+    finally:
+        pythoncom.CoUninitialize()
+    return pdf_path
+
+
 def extract_paragraphs(docx_path: Path) -> list[str]:
     """Return all non-empty paragraph texts (top-level + table cells), in document order."""
     doc = Document(str(docx_path))
@@ -58,6 +82,40 @@ def full_text(docx_path: Path) -> str:
     return "\n".join(extract_paragraphs(docx_path))
 
 
+def _set_text_preserving_runs(p, new_text: str) -> None:
+    """Replace a paragraph's text while keeping run-level formatting intact.
+
+    Tailoring edits are keyword swaps, so old and new text usually share a long
+    common prefix and suffix. Only the differing middle span is rewritten (it
+    takes the formatting of the run it starts in); every character outside the
+    span keeps its original run — bold/italic/font changes survive untouched.
+    """
+    old = p.text
+    if not p.runs:
+        p.text = new_text
+        return
+    # Longest common prefix / suffix (non-overlapping).
+    a = 0
+    while a < len(old) and a < len(new_text) and old[a] == new_text[a]:
+        a += 1
+    b = 0
+    while b < len(old) - a and b < len(new_text) - a and old[len(old) - 1 - b] == new_text[len(new_text) - 1 - b]:
+        b += 1
+    start, end = a, len(old) - b          # changed span in old text
+    mid_new = new_text[a:len(new_text) - b]
+    pos = 0
+    n = len(old)
+    last = len(p.runs) - 1
+    for i, r in enumerate(p.runs):
+        rlen = len(r.text)
+        rs, re_ = pos, pos + rlen
+        pos = re_
+        head = r.text[:max(0, min(rlen, start - rs))]
+        tail = r.text[min(rlen, max(0, end - rs)):]
+        is_anchor = (rs <= start < re_) or (start == n and re_ == n and i == last)
+        r.text = head + (mid_new if is_anchor else "") + tail
+
+
 def apply_replacements(
     docx_path: Path,
     replacements: dict[int, str],
@@ -65,8 +123,8 @@ def apply_replacements(
 ) -> Path:
     """Apply paragraph replacements by index. Indexes match `extract_paragraphs` order.
 
-    Preserves the formatting of the first run in each replaced paragraph; subsequent runs
-    are removed. Tables are also walked.
+    Formatting is preserved: only the changed span of each paragraph is
+    rewritten (see _set_text_preserving_runs). Tables are also walked.
     """
     doc = Document(str(docx_path))
     walker_idx = 0
@@ -77,15 +135,7 @@ def apply_replacements(
         if not text:
             return
         if walker_idx in replacements:
-            new_text = replacements[walker_idx]
-            if p.runs:
-                first = p.runs[0]
-                first.text = new_text
-                # Remove remaining runs (they would duplicate the old text).
-                for r in p.runs[1:]:
-                    r.text = ""
-            else:
-                p.text = new_text
+            _set_text_preserving_runs(p, replacements[walker_idx])
         walker_idx += 1
 
     for p in doc.paragraphs:

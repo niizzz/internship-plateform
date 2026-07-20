@@ -398,33 +398,59 @@ def in_europe(location: str) -> bool:
 # --- Description formatting --------------------------------------------------
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.S | re.I)
-_BLOCK_CLOSE_RE = re.compile(r"</(p|div|section|article|tr|table|ul|ol|h[1-6]|blockquote)\s*>", re.I)
+_BLOCK_CLOSE_RE = re.compile(r"</(p|div|section|article|tr|table|ul|ol|blockquote)\s*>", re.I)
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
-_HEADING_OPEN_RE = re.compile(r"<(h[1-6]|strong|b)\b[^>]*>", re.I)
 _ANY_TAG_RE = re.compile(r"<[^>]+>")
 _LI_OPEN_RE = re.compile(r"<li\b[^>]*>", re.I)
+_H_OPEN_RE = re.compile(r"<h[1-6]\b[^>]*>", re.I)
+_H_CLOSE_RE = re.compile(r"</h[1-6]\s*>", re.I)
+_BOLD_TAG_RE = re.compile(r"</?(?:strong|b)\b[^>]*>", re.I)
+_EMPTY_BOLD_RE = re.compile(r"\*\*(\s*)\*\*")
+_HEADING_LINE_RE = re.compile(r"^##\s*")
 
 
-def html_to_text(raw: str, limit: int = 6000) -> str:
-    """Convert posting HTML to readable plain text, PRESERVING structure.
+def html_to_text(raw: str, limit: int = 7000) -> str:
+    """Convert posting HTML to readable "markdown-lite", PRESERVING structure.
 
-    Block-level closes and <br> become newlines, <li> becomes a bullet line —
-    the frontend renders descriptions with `whitespace-pre-wrap`, so this is
-    what keeps them from collapsing into one giant blob.
+    Block-level closes and <br> become newlines, <li> becomes a "• " bullet
+    line, <h1-6> become "## " heading lines and <strong>/<b> become **bold**.
+    The frontend's OfferDescription component renders these markers as real
+    headings/lists/bold; older rows without markers still render via its
+    heuristics.
     """
     if not raw:
         return ""
     text = _SCRIPT_STYLE_RE.sub(" ", raw)
     text = _LI_OPEN_RE.sub("\n• ", text)
     text = _BR_RE.sub("\n", text)
+    text = _H_OPEN_RE.sub("\n## ", text)
+    text = _H_CLOSE_RE.sub("\n", text)
+    text = _BOLD_TAG_RE.sub("**", text)
     text = _BLOCK_CLOSE_RE.sub("\n", text)
     text = _ANY_TAG_RE.sub(" ", text)
     text = _htmllib.unescape(text)
+    # Drop empty bold pairs left by icon/spacer <strong> tags (keep the gap).
+    text = _EMPTY_BOLD_RE.sub(r"\1", text)
     # Normalise whitespace but keep line structure.
     lines = [re.sub(r"[ \t ]+", " ", ln).strip() for ln in text.split("\n")]
+    # Re-open/close bold on every line so **spans** never straddle newlines —
+    # banks bold whole multi-paragraph blocks, but the renderer works per line.
+    bold_open = False
+    balanced: list[str] = []
+    for ln in lines:
+        if ln:
+            if bold_open:
+                ln = "**" + ln
+            bold_open = ln.count("**") % 2 == 1
+            if bold_open:
+                ln += "**"
+            ln = _EMPTY_BOLD_RE.sub(r"\1", ln).strip()
+        balanced.append(ln)
     out: list[str] = []
     blank = 0
-    for ln in lines:
+    for ln in balanced:
+        if ln and _HEADING_LINE_RE.sub("", ln).strip("*•· ") == "":
+            ln = ""  # heading/bullet/bold marker with no text behind it
         if not ln:
             blank += 1
             if blank > 1:

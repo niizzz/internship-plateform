@@ -30,8 +30,12 @@ You will receive:
 Your job: produce minimally-edited replacements for each paragraph so the CV:
 - Mirrors keywords and phrasings from the job posting (ATS optimization)
 - Preserves all factual content (do NOT invent experience, schools, dates, employers)
-- Preserves bullet structure and approximate length per paragraph
+- Preserves bullet structure and layout: the CV is exactly one page and MUST stay one page
 - Uses the same tone and language as the original
+
+HARD CONSTRAINTS on every replacement:
+- new_text must be the SAME LENGTH OR SHORTER than the original paragraph (character count). Never longer — replacements longer than the original are rejected automatically.
+- Edit surgically: swap only the words that need to change; keep the rest of the paragraph character-for-character identical (this preserves the CV's fonts and layout).
 
 Output STRICT JSON only, no prose, no markdown fences:
 {
@@ -45,19 +49,28 @@ Only include paragraphs you are actually changing. If a paragraph is fine as-is 
 Never hallucinate. Never change company names, schools, GPAs, dates, or contact details.
 """
 
-COVER_LETTER_SYSTEM = """You are an expert career coach writing a tailored cover letter for a finance student applying to a Sales, Trading, or Structuring internship at a top investment bank.
+COVER_LETTER_SYSTEM = """You write a cover letter for a finance student applying to a Sales / Trading / Structuring internship — in the style of a short, well-told STORY, not a resume rewritten in prose. Read the candidate's CV and the job posting, then write a letter a busy recruiter actually wants to finish.
 
-Output a polished, professional cover letter in English. Tone: confident, concise, specific. Length: 3-4 short paragraphs.
+VOICE & STYLE:
+- Open with a HOOK — never "I am writing to apply for...". Start mid-thought: a specific moment, decision, or conviction, or a concrete detail that pulls the reader in and connects the candidate to THIS desk and THIS bank. One or two sentences.
+- Build the letter around ONE signature story from the candidate's real experience: the situation, the problem or tension, what the candidate personally DID, the skill it took, and the outcome (with the real numbers). Give it a small arc — show, don't list.
+- Weave in at most one or two other proof points naturally inside the narrative; never a comma-spliced dump of achievements.
+- Make the motivation specific and genuine: a real reason this bank/desk fits the candidate's trajectory (something concrete about the role, team, or the firm's approach — infer from the posting). No generic flattery.
+- Confident, warm, human first-person voice. Vary sentence length. Sound like a sharp person talking, not a template.
 
-Structure:
-- Opening: state the role, why this bank specifically (1-2 specific reasons), and one-sentence personal motivation.
-- Body 1: most relevant experience or coursework, linked explicitly to skills the job posting names.
-- Body 2: one quantified or specific accomplishment showing fit (markets interest, technical chops, leadership).
-- Closing: short, polite, asks for interview.
+BANNED phrases (never use): "I am writing to apply", "I am confident that", "team player", "hit the ground running", "passionate about finance", "detail-oriented", "fast-paced environment", "I believe my skills", "perfect fit", "hard-working", "dynamic". Do not restate the CV line by line. Do not open with the candidate's name or a date.
 
-Do NOT invent facts. Use only information present in the candidate's CV. Do not include placeholders like [Your Name] — use the candidate's actual name from the CV.
+STRUCTURE (about 4 short paragraphs, one page, ~320–400 words):
+1. Hook + why this exact role and bank.
+2. The signature story: problem → the candidate's action → skill → result, tied to what the posting needs.
+3. One more angle of fit — a second short proof point or a genuine, specific motivation.
+4. A brief, warm close that looks forward and asks for a conversation.
 
-Output plain text only. No markdown, no JSON, no preamble like "Here is the cover letter".
+HARD RULES:
+- Use ONLY facts from the candidate's CV — never invent experience, tools, numbers, or results. Keep real numbers exact; they carry the story.
+- Use the candidate's real name for the sign-off; no placeholders like [Your Name].
+- English. Plain text only — no markdown, no headings, no preamble like "Here is the cover letter".
+- End with "Sincerely," on its own line, then the candidate's full name on the next line.
 """
 
 
@@ -153,9 +166,120 @@ def tailor_cv_paragraphs(
     for r in parsed.get("replacements", []):
         idx = r.get("index")
         new_text = r.get("new_text")
-        if isinstance(idx, int) and isinstance(new_text, str):
-            out[idx] = new_text
+        if not (isinstance(idx, int) and isinstance(new_text, str)):
+            continue
+        if 0 <= idx < len(base_cv_paragraphs):
+            # Enforce the one-page invariant: a longer paragraph can reflow the
+            # whole CV onto a second page. Small tolerance, then reject.
+            old_len = len(base_cv_paragraphs[idx])
+            if len(new_text) > max(old_len + 10, int(old_len * 1.05)):
+                logger.info("Rejecting over-long replacement for paragraph %d (%d > %d chars)",
+                            idx, len(new_text), old_len)
+                continue
+        out[idx] = new_text
     return out
+
+
+CV_JSON_SYSTEM = """You tailor a finance student's CV to a specific Sales / Trading / Structuring internship, for ATS keyword matching. You are given the CV's EDITABLE content as JSON plus a job posting. Rewrite ONLY the wording so it mirrors the posting's language and desk — keep every fact identical.
+
+Rewrite:
+- "profile": the summary paragraph. Keep it about the same length and end with a "Seeking a … internship at <this bank> …" sentence aimed at THIS role and bank.
+- for each experience entry: its "subtitle" (only if the entry has one) and its "bullets" — mirror the skills/keywords the posting names.
+
+HARD RULES:
+- NEVER change employers, schools, job titles, dates, locations, numbers, GPAs, or metrics. Only rephrase.
+- Keep each bullet the same length or shorter (the CV must stay one page) and keep the SAME NUMBER of bullets per entry.
+- Do not invent experience, tools, or results.
+- Keep English and a professional tone.
+
+Output STRICT JSON only, no prose, no markdown fences:
+{"profile": "...", "experience": [{"index": 0, "subtitle": "...", "bullets": ["...", "..."]}]}
+Include an experience entry only if you changed it; omit "subtitle" when the entry has none."""
+
+
+def _extract_json(text: str) -> dict:
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        logger.warning("No JSON found in tailoring response: %s", text[:300])
+        return {}
+    try:
+        return json.loads(match.group(0), strict=False)
+    except json.JSONDecodeError as e:
+        logger.warning("Tailoring JSON parse failed: %s", e)
+        return {}
+
+
+def _profile_section(cv: dict):
+    for s in cv.get("sections", []):
+        if s.get("type") == "text" and str(s.get("heading", "")).upper().startswith("PROFILE"):
+            return s
+    return None
+
+
+def _experience_section(cv: dict):
+    for s in cv.get("sections", []):
+        if str(s.get("heading", "")).upper().startswith("PROFESSIONAL EXPERIENCE"):
+            return s
+    return None
+
+
+def tailor_cv_json(base_cv: dict, offer: dict) -> tuple[dict, int]:
+    """Return (tailored_cv, n_changes). Rewrites only the profile summary and the
+    experience subtitles/bullets to mirror the posting; every structural field
+    (names, titles, dates, education, skills) is preserved verbatim."""
+    import copy
+
+    prof_s = _profile_section(base_cv)
+    exp_s = _experience_section(base_cv)
+    payload = {
+        "profile": (prof_s or {}).get("text", ""),
+        "experience": [
+            {
+                "index": i,
+                "role": e.get("left", ""),  # context only — do not change
+                **({"subtitle": e["subtitle"]} if e.get("subtitle") else {}),
+                "bullets": list(e.get("bullets") or []),
+            }
+            for i, e in enumerate((exp_s or {}).get("entries", []))
+        ],
+    }
+    prompt = (
+        f"{CV_JSON_SYSTEM}\n\n"
+        f"CV EDITABLE CONTENT:\n{json.dumps(payload, ensure_ascii=False, indent=1)}\n\n"
+        f"Tailor for this job:\n\n{_job_block(offer)}\n\nReturn JSON only."
+    )
+    parsed = _extract_json(_run_claude(prompt))
+    tailored = copy.deepcopy(base_cv)
+    changes = 0
+
+    new_prof = parsed.get("profile")
+    ts = _profile_section(tailored)
+    if ts is not None and isinstance(new_prof, str) and new_prof.strip():
+        if ts.get("text") != new_prof.strip():
+            changes += 1
+        ts["text"] = new_prof.strip()
+
+    edits = {e.get("index"): e for e in parsed.get("experience", []) if isinstance(e, dict)}
+    te = _experience_section(tailored)
+    if te is not None:
+        for i, entry in enumerate(te.get("entries", [])):
+            ed = edits.get(i)
+            if not ed:
+                continue
+            if entry.get("subtitle") and isinstance(ed.get("subtitle"), str) and ed["subtitle"].strip():
+                if entry["subtitle"] != ed["subtitle"].strip():
+                    changes += 1
+                entry["subtitle"] = ed["subtitle"].strip()
+            nb = ed.get("bullets")
+            old = entry.get("bullets") or []
+            # Keep the same bullet count so the layout never shifts.
+            if isinstance(nb, list) and old:
+                clean = [str(x).strip() for x in nb if str(x).strip()]
+                if len(clean) == len(old):
+                    if clean != old:
+                        changes += 1
+                    entry["bullets"] = clean
+    return tailored, changes
 
 
 def generate_cover_letter(

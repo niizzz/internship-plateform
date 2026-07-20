@@ -7,6 +7,8 @@ export default function SettingsPage() {
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const [cvFile, setCvFile] = useState<File | null>(null)
   const [clFile, setClFile] = useState<File | null>(null)
+  const [extraFile, setExtraFile] = useState<File | null>(null)
+  const [extraLabel, setExtraLabel] = useState('')
 
   const uploadCV = useMutation({
     mutationFn: () => api.uploadCV(cvFile!),
@@ -15,6 +17,14 @@ export default function SettingsPage() {
   const uploadCL = useMutation({
     mutationFn: () => api.uploadCoverLetter(clFile!),
     onSuccess: () => { setClFile(null); qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+  const uploadExtra = useMutation({
+    mutationFn: () => api.uploadExtraDocument(extraFile!, extraLabel),
+    onSuccess: () => { setExtraFile(null); setExtraLabel(''); qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+  const deleteExtra = useMutation({
+    mutationFn: (index: number) => api.deleteExtraDocument(index),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
   })
 
   return (
@@ -60,6 +70,44 @@ export default function SettingsPage() {
         />
         <Hint>Upload your own cover-letter template. You'll be able to attach either this or the AI-generated one on each application.</Hint>
       </Card>
+
+      <Card title="Additional documents">
+        {settings?.extra_documents?.length
+          ? (
+            <ul className="mb-3 space-y-1.5">
+              {settings.extra_documents.map((d, i) => (
+                <li key={`${d.filename}-${i}`} className="flex items-center justify-between gap-2 text-sm">
+                  <span>
+                    <span className="text-slate-200">{d.label}</span>{' '}
+                    <span className="font-mono text-neon-cyan text-xs">({d.filename})</span>
+                  </span>
+                  <button onClick={() => deleteExtra.mutate(i)}
+                    disabled={deleteExtra.isPending}
+                    className="px-2 py-1 rounded text-xs text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+          : <div className="text-sm mb-3 italic text-slate-500">none uploaded</div>}
+        <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center mb-2">
+          <input type="text" placeholder="Label (e.g. CFA Level 1 result)"
+            value={extraLabel} onChange={e => setExtraLabel(e.target.value)}
+            className={inp + ' flex-1'} />
+        </div>
+        <FileRow
+          file={extraFile} setFile={setExtraFile}
+          onUpload={() => uploadExtra.mutate()}
+          uploading={uploadExtra.isPending}
+          accept=".pdf,.docx,.png,.jpg,.jpeg"
+        />
+        <Hint>
+          Certificates, transcripts, test results… During assisted apply these are uploaded
+          into "other / additional / supporting document" file inputs on application forms
+          (the CV and cover letter keep their own dedicated slots).
+        </Hint>
+      </Card>
     </div>
   )
 }
@@ -90,12 +138,13 @@ function Hint({ children }: { children: any }) {
   return <div className="mt-2 text-xs text-slate-500">{children}</div>
 }
 
-function FileRow({ file, setFile, onUpload, uploading }: {
+function FileRow({ file, setFile, onUpload, uploading, accept = '.pdf,.docx' }: {
   file: File | null; setFile: (f: File | null) => void; onUpload: () => void; uploading: boolean
+  accept?: string
 }) {
   return (
     <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
-      <input type="file" accept=".pdf,.docx"
+      <input type="file" accept={accept}
         onChange={e => setFile(e.target.files?.[0] ?? null)}
         className="text-sm text-slate-300 file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-ink-700 file:text-slate-200 file:cursor-pointer hover:file:bg-ink-600" />
       <button onClick={onUpload}

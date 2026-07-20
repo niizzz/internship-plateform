@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 # Playwright needs subprocess support; on Windows we must use ProactorEventLoop.
 if sys.platform == "win32":
@@ -12,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -27,8 +28,9 @@ from db import (
 from scrapers import ALL_SCRAPERS
 from scrapers.registry import build_scrapers
 from scrapers.orchestrator import refresh_all
-from cv_utils import ensure_docx, extract_paragraphs, full_text, apply_replacements, write_cover_letter_docx
-from llm import tailor_cv_paragraphs, generate_cover_letter, ClaudeCliError, is_usage_limit_error
+from cv_utils import ensure_docx, full_text
+from cv_render import render_cv_pdf, render_cover_letter_pdf, flatten_cv_text
+from llm import tailor_cv_json, generate_cover_letter, ClaudeCliError, is_usage_limit_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +39,8 @@ BACKEND_DIR = Path(__file__).parent
 STORAGE_DIR = BACKEND_DIR / "storage"
 CV_DIR = STORAGE_DIR / "cvs"
 OFFERS_DIR = STORAGE_DIR / "offers"
-for d in (STORAGE_DIR, CV_DIR, OFFERS_DIR):
+DOCS_DIR = STORAGE_DIR / "documents"
+for d in (STORAGE_DIR, CV_DIR, OFFERS_DIR, DOCS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # Lock to prevent concurrent refreshes.
@@ -125,11 +128,17 @@ class ApplicationUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class ExtraDocOut(BaseModel):
+    label: str
+    filename: str
+
+
 class SettingsOut(BaseModel):
     has_api_key: bool
     anthropic_model: str
     base_cv_filename: Optional[str]
     base_cover_letter_filename: Optional[str] = None
+    extra_documents: list[ExtraDocOut] = []
 
 
 class SettingsUpdate(BaseModel):
@@ -270,11 +279,9 @@ async def _do_refresh():
                 "finished_at": datetime.utcnow(),
                 "result": result,
             }
-            # Queue CV/CL tailoring for any offer that doesn't have docs yet.
-            try:
-                start_auto_tailor()
-            except Exception as e:
-                logger.warning("Auto-tailor kickoff failed: %s", e)
+            # No auto-tailoring after refresh (user's choice 2026-07-07):
+            # documents are generated on demand when the user clicks Apply.
+            # POST /api/tailor/run still exists for a manual bulk run.
         except Exception as e:
             logger.exception("Refresh failed: %s", e)
             _last_refresh = {
@@ -343,18 +350,25 @@ class TailorResponse(BaseModel):
     cv_changed_paragraphs: int
 
 
+BASE_CV_JSON = CV_DIR / "base_cv.json"
+
+
 def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> TailorResponse:
-    """Generate tailored CV + cover letter for one offer via the Claude CLI. Blocking."""
-    base_cv = Path(settings.base_cv_path)
-    work_dir = CV_DIR / "_work"
-    base_docx = ensure_docx(base_cv, work_dir)
-    paragraphs = extract_paragraphs(base_docx)
-    cv_text = "\n".join(paragraphs)
+    """Generate tailored CV + cover letter (both PDF) for one offer via the
+    Claude CLI. The CV is rendered from structured data through a fixed HTML
+    template (cv_render), so formatting is always identical to the base CV —
+    tailoring only rewrites text. Blocking."""
+    if not BASE_CV_JSON.exists():
+        raise ClaudeCliError(
+            "Structured base CV not found (storage/cvs/base_cv.json). It defines "
+            "the CV layout + content that tailoring rewrites."
+        )
+    base_cv = json.loads(BASE_CV_JSON.read_text(encoding="utf-8"))
 
     base_cl_text = None
     if settings.base_cover_letter_path and Path(settings.base_cover_letter_path).exists():
         try:
-            base_cl_docx = ensure_docx(Path(settings.base_cover_letter_path), work_dir)
+            base_cl_docx = ensure_docx(Path(settings.base_cover_letter_path), CV_DIR / "_work")
             base_cl_text = full_text(base_cl_docx)
         except Exception as e:
             logger.warning("Could not read base cover letter: %s", e)
@@ -368,17 +382,19 @@ def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> Tailor
         "description": o.description,
     }
 
-    replacements = tailor_cv_paragraphs(base_cv_paragraphs=paragraphs, offer=offer_dict)
+    tailored_cv, n_changes = tailor_cv_json(base_cv, offer_dict)
 
     offer_folder = OFFERS_DIR / f"{o.id}_{_slug(o.bank)}_{_slug(o.role_title)[:40]}"
-    cv_out = offer_folder / "tailored_cv.docx"
-    apply_replacements(base_docx, replacements, cv_out)
+    cv_out = render_cv_pdf(tailored_cv, offer_folder / "tailored_cv.pdf")
 
     cl_text = generate_cover_letter(
-        base_cv_text=cv_text, offer=offer_dict, base_cover_letter_text=base_cl_text,
+        base_cv_text=flatten_cv_text(base_cv), offer=offer_dict, base_cover_letter_text=base_cl_text,
     )
-    cl_out = offer_folder / "cover_letter.docx"
-    write_cover_letter_docx(cl_text, cl_out)
+    header = {
+        "name": base_cv.get("name"), "contact": base_cv.get("contact"),
+        "linkedin_url": base_cv.get("linkedin_url"), "linkedin_label": base_cv.get("linkedin_label"),
+    }
+    cl_out = render_cover_letter_pdf(cl_text, header, offer_folder / "cover_letter.pdf")
 
     # Upsert TailoredDocument rows.
     for kind, path in ((DocumentKind.cv, cv_out), (DocumentKind.cover_letter, cl_out)):
@@ -401,7 +417,7 @@ def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> Tailor
         cv_path=str(cv_out),
         cover_letter_path=str(cl_out),
         cover_letter_text=cl_text,
-        cv_changed_paragraphs=len(replacements),
+        cv_changed_paragraphs=n_changes,
     )
 
 
@@ -576,6 +592,10 @@ def get_settings(session: Session = Depends(get_session)):
         anthropic_model=s.anthropic_model,
         base_cv_filename=Path(s.base_cv_path).name if s.base_cv_path else None,
         base_cover_letter_filename=Path(s.base_cover_letter_path).name if s.base_cover_letter_path else None,
+        extra_documents=[
+            ExtraDocOut(label=d.get("label") or Path(d["path"]).stem, filename=Path(d["path"]).name)
+            for d in (s.extra_documents or [])
+        ],
     )
 
 
@@ -620,6 +640,47 @@ async def upload_base_cover_letter(file: UploadFile = File(...), session: Sessio
         session.add(s)
     s.base_cover_letter_path = str(target)
     session.commit()
+    return get_settings(session)
+
+
+@app.post("/api/settings/extra-document", response_model=SettingsOut)
+async def upload_extra_document(
+    file: UploadFile = File(...),
+    label: Optional[str] = Form(None),
+    session: Session = Depends(get_session),
+):
+    """Add a miscellaneous document (certificate, transcript, ...) that the
+    assisted-apply engine offers to 'other/additional document' file inputs."""
+    if not file.filename or not file.filename.lower().endswith((".pdf", ".docx", ".png", ".jpg", ".jpeg")):
+        raise HTTPException(400, "Only PDF, DOCX, PNG or JPG accepted")
+    target = DOCS_DIR / Path(file.filename).name
+    target.write_bytes(await file.read())
+    s = session.get(Settings, 1)
+    if not s:
+        s = Settings(id=1)
+        session.add(s)
+    docs = [d for d in (s.extra_documents or []) if d.get("path") != str(target)]
+    docs.append({"label": (label or "").strip() or Path(file.filename).stem, "path": str(target)})
+    s.extra_documents = docs  # reassign so the JSON column is marked dirty
+    session.commit()
+    return get_settings(session)
+
+
+@app.delete("/api/settings/extra-document/{index}", response_model=SettingsOut)
+def delete_extra_document(index: int, session: Session = Depends(get_session)):
+    s = session.get(Settings, 1)
+    docs = list(s.extra_documents or []) if s else []
+    if not s or index < 0 or index >= len(docs):
+        raise HTTPException(404, "No such document")
+    removed = docs.pop(index)
+    s.extra_documents = docs
+    session.commit()
+    try:
+        p = Path(removed.get("path", ""))
+        if p.is_file() and p.parent == DOCS_DIR:
+            p.unlink()
+    except OSError:
+        pass
     return get_settings(session)
 
 
@@ -708,6 +769,20 @@ async def apply_assist(
     cv_path = _resolve_doc_path(session, offer_id, DocumentKind.cv, body.cv_source, settings)
     cl_path = _resolve_doc_path(session, offer_id, DocumentKind.cover_letter, body.cl_source, settings)
 
+    # On-demand tailoring: documents are only generated when the user applies.
+    # Takes ~1-2 min (two Claude CLI calls); run off the event loop.
+    needs_tailored = (body.cv_source == "tailored" and not cv_path) or \
+                     (body.cl_source == "tailored" and not cl_path)
+    if needs_tailored:
+        if not settings.base_cv_path or not Path(settings.base_cv_path).exists():
+            raise HTTPException(400, "No base CV uploaded. Upload it in Settings first.")
+        try:
+            await asyncio.to_thread(_tailor_offer_impl, session, o, settings)
+        except ClaudeCliError as e:
+            raise HTTPException(502, f"Tailoring failed: {e}")
+        cv_path = _resolve_doc_path(session, offer_id, DocumentKind.cv, body.cv_source, settings)
+        cl_path = _resolve_doc_path(session, offer_id, DocumentKind.cover_letter, body.cl_source, settings)
+
     # Mark as applied immediately (user reviews + submits in browser).
     app_row = session.exec(select(Application).where(Application.offer_id == offer_id)).first()
     if not app_row:
@@ -726,6 +801,11 @@ async def apply_assist(
     from apply_assist import run_assist
 
     profile = {f: getattr(settings, f) for f in _PROFILE_FIELDS}
+    # Extras (place of birth, ...) + the offer's country, so the engine can
+    # answer right-to-work/sponsorship questions per jurisdiction.
+    profile["extras_json"] = settings.extras_json or {}
+    profile["offer_country"] = o.country
+    extra_docs = [d for d in (settings.extra_documents or []) if d.get("path") and Path(d["path"]).exists()]
 
     async def _assist():
         try:
@@ -733,6 +813,7 @@ async def apply_assist(
                 o.apply_url, profile,
                 str(cv_path) if cv_path else None,
                 str(cl_path) if cl_path else None,
+                extra_docs=extra_docs,
             )
         except Exception as e:
             logger.warning("apply-assist failed: %s", e)

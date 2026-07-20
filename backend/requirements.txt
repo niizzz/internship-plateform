@@ -9,3 +9,4 @@ pypdf
 pdf2docx
 httpx
 pydantic-settings
+pywin32

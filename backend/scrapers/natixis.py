@@ -7,6 +7,14 @@ Response: {"code":"all_good","data":{"total":N,"items":[...]}} where each item
 carries title, contract, localisation, link and the full HTML description — so
 no per-offer enrichment is needed. Listings are in French; S&T desk names
 (Trading, Structuring, Sales, FX, ...) and the program filter handle both langs.
+
+Each item exposes TWO links:
+- `link`         -> the marketing detail page ("Découvrir", /job/<slug>). When
+                    an offer is pulled it 302s to the careers homepage, so it is
+                    NOT a reliable apply target — use it only as source_url.
+- `postulate_link` -> the real "Postuler" URL: the Oracle HCM Candidate
+                    Experience application (ekez.fa.em2.oraclecloud.com, keyed
+                    on advert_id). This is the apply_url.
 """
 from __future__ import annotations
 
@@ -46,6 +54,21 @@ def _as_text(v) -> str:
     return _clean(str(v or ""))
 
 
+_BASE = "https://recrutement.natixis.com"
+
+
+def _link_url(v) -> str:
+    """The href of a Natixis link field, which is either a bare string or a
+    {url, title, target, internal} object."""
+    if isinstance(v, dict):
+        v = v.get("url") or v.get("href") or ""
+    return v or ""
+
+
+def _absolutize(url: str) -> str:
+    return (_BASE + url) if url.startswith("/") else url
+
+
 class NatixisScraper(BankScraper):
     bank_name = "Natixis"
     careers_url = "https://recrutement.natixis.com/nos-offres-demploi"
@@ -78,17 +101,23 @@ class NatixisScraper(BankScraper):
                     ext_id = str(it.get("advert_id") or it.get("post_id") or "")
                     if not ext_id or ext_id in offers:
                         continue
-                    link = it.get("link")
-                    if isinstance(link, dict):
-                        link = link.get("url") or link.get("href") or ""
-                    apply_url = link or f"https://recrutement.natixis.com/nos-offres-demploi?jobid={ext_id}"
+                    # apply_url = the real "Postuler" link (Oracle HCM apply
+                    # flow). Fall back to the detail page, then a search URL.
+                    postulate = _link_url(it.get("postulate_link"))
+                    detail = _link_url(it.get("link"))
+                    if postulate:
+                        apply_url = _absolutize(postulate)
+                    elif detail:
+                        apply_url = _absolutize(detail)
+                    else:
+                        apply_url = f"{_BASE}/nos-offres-demploi?jobid={ext_id}"
                     offers[ext_id] = ScrapedOffer(
                         bank="Natixis",
                         external_id=ext_id,
                         role_title=_clean(it.get("title") or ""),
                         location=_as_text(it.get("localisation") or it.get("localisations")),
                         apply_url=apply_url,
-                        source_url=self.careers_url,
+                        source_url=_absolutize(detail) if detail else self.careers_url,
                         description=html_to_text(it.get("description") or "") or None,
                         program_type=_as_text(it.get("contract")) or None,
                     )

@@ -122,6 +122,9 @@ class Settings(SQLModel, table=True):
     work_authorization: Optional[str] = None  # e.g. "UK Citizen", "Tier 4 visa"
     languages: Optional[str] = None  # free-form: "French (native), English (C2)"
     extras_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    # Miscellaneous documents (certificates, transcripts, ...) offered to
+    # "other document" file inputs during assisted apply: [{"label", "path"}]
+    extra_documents: list = Field(default_factory=list, sa_column=Column(JSON))
 
 
 # Columns added after the initial schema. SQLModel.metadata.create_all() will only create
@@ -148,6 +151,7 @@ _SETTINGS_NEW_COLUMNS = [
     ("work_authorization", "TEXT"),
     ("languages", "TEXT"),
     ("extras_json", "JSON"),
+    ("extra_documents", "JSON"),
 ]
 
 

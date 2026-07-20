@@ -39,11 +39,17 @@ export interface RefreshStatus {
   implemented_scrapers: string[]
 }
 
+export interface ExtraDoc {
+  label: string
+  filename: string
+}
+
 export interface SettingsInfo {
   has_api_key: boolean
   anthropic_model: string
   base_cv_filename: string | null
   base_cover_letter_filename: string | null
+  extra_documents: ExtraDoc[]
 }
 
 export interface TailorQueueStatus {
@@ -160,6 +166,16 @@ export const api = {
     if (!r.ok) throw new Error(await r.text())
     return r.json()
   },
+  uploadExtraDocument: async (file: File, label: string): Promise<SettingsInfo> => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (label.trim()) fd.append('label', label.trim())
+    const r = await fetch('/api/settings/extra-document', { method: 'POST', body: fd })
+    if (!r.ok) throw new Error(await r.text())
+    return r.json()
+  },
+  deleteExtraDocument: (index: number) =>
+    jsend<SettingsInfo>('DELETE', `/api/settings/extra-document/${index}`),
   getProfile: () => jget<Profile>('/api/profile'),
   updateProfile: (body: Profile) => jsend<Profile>('PUT', '/api/profile', body),
   stats: () => jget<Stats>('/api/stats'),
