@@ -5,13 +5,14 @@ To add a new bank: implement a `BankScraper` subclass in its own module under
 
 Status:
   IMPLEMENTED (26): JPMorgan, Citi, Goldman Sachs, Morgan Stanley, UBS,
-    BNP Paribas, HSBC*, Deutsche Bank, Barclays, SocGen, Santander, CACIB,
+    BNP Paribas, HSBC, Deutsche Bank, Barclays, SocGen, Santander, CACIB,
     Natixis, Lazard, Rothschild & Co, Bank of America, Commerzbank,
     Kepler Cheuvreux, Nomura (empty board off-season is a clean zero),
     BBVA, Euronext, RBC, CMC Markets, Amundi, Lazard Frères Gestion,
     Maven Securities.
-  *HSBC known gap: scrapes the experienced/GSC board; the student Global
-   Markets programmes live on a separate Avature tenant not yet captured.
+  HSBC now scrapes the Emerging Talent board (apply.careers.hsbc.com), which
+  carries the real "Markets - Sales and Trading" student programmes; London
+  S&T internships appear Sept–Nov.
 """
 from __future__ import annotations
 
