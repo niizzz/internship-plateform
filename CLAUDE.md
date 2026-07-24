@@ -1,7 +1,7 @@
 # Internship Plateform — agent handoff notes
 
 Personal, single-user platform for landing a Sales & Trading internship:
-scrapes 26 bank career sites, tailors CV/cover letters per offer via the
+scrapes 28 bank career sites, tailors CV/cover letters per offer via the
 Claude Code CLI, tracks the application funnel, and assist-fills ATS forms.
 Owner: Nizar (user's spelling "plateform" is intentional).
 
@@ -69,11 +69,20 @@ Owner: Nizar (user's spelling "plateform" is intentional).
   re-run the snapshot+assembly (see git log for the 2026-07-24 session), and
   republish passing that URL as `url` to the Artifact tool. Re-sanitize:
   profile nulls, notes nulls, notifications [], no real filenames.
-- KNOWN GAP: HSBC scraper reads the experienced/GSC board; student Global
-  Markets programmes live on hsbc.avature.net (JS SPA, search path never
-  captured — needs a live Playwright dig). It logs this every refresh.
-- NEXT BANK WORK: see `NEXT_BANKS.md` (HSBC repoint, DB German sweep,
-  UniCredit + Mizuho discovery/implementation, Rothschild verification).
+- 2026-07-25 bank additions (NEXT_BANKS.md work, all done): HSBC re-pointed
+  to the Emerging Talent board (apply.careers.hsbc.com — real Markets S&T
+  student roles, GSC gap closed); UniCredit added (careers.unicredit.eu
+  Avature — surfaces Milan/Munich S&T interns live); Mizuho added
+  (careers.mizuhoemea.com SuccessFactors RMK — London EMEA, off-season now);
+  Deutsche Bank verified (EN==DE sweep, no change); Rothschild verified +
+  filter now catches its Redburn Equity Sales intern. Filter learned
+  "equity sales"/Redburn and "tirocinio"/"working student" (test_filter 63).
+- KNOWN: Barclays (Playwright, Phenom bot wall) can exceed the 120s scraper
+  timeout and land in `failed` — expected; the zero-streak guard preserves
+  its offers. Mizuho detail pages are a JS-shell to httpx so descriptions
+  aren't enriched (location comes from the slug); title-based classification
+  is unaffected. HSBC/Mizuho/Deutsche Bank keep 0 S&T off-season by design —
+  their S&T intern intakes open ~Sept-Nov 2026.
 - Sept–Nov 2026 is the posting season for GS/JPM/MS/Citi/UBS/BofA/HSBC summer
   2027 internships — expect offer volume to jump; enrich caps log truncation.
 - Deferred nice-to-haves: dry-run mode for apply-assist; surface per-offer

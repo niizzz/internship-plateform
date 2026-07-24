@@ -36,6 +36,8 @@ const M: Record<string, BankMeta> = {
   'CMC Markets':          { symbol: 'CMCX', color: '#E8556B', domain: 'cmcmarkets.com',     blurb: 'CFD & spread-betting broker. Trading technology.' },
   'Amundi':               { symbol: 'AMUN', color: '#3F9BDC', domain: 'amundi.com',         blurb: "Europe's largest asset manager. Product structuring." },
   'Maven Securities':     { symbol: 'MAVN', color: '#2ECC9B', domain: 'mavensecurities.com',blurb: 'Prop trading & market making. Options and volatility.' },
+  'UniCredit':            { symbol: 'UCG',  color: '#E4002B', domain: 'unicreditgroup.eu',  blurb: 'Pan-European bank. Client Solutions markets desks in Milan & Munich.' },
+  'Mizuho':               { symbol: 'MZH',  color: '#2B4B9B', domain: 'mizuhogroup.com',    blurb: 'Japanese bank, London EMEA hub. Securitised products & structured trading.' },
 }
 
 const NORM: Record<string, BankMeta> = {}
