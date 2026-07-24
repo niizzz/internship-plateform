@@ -294,6 +294,13 @@ def tailor_cv_json(base_cv: dict, offer: dict) -> tuple[dict, int]:
                     if capped != old:
                         changes += 1
                     entry["bullets"] = capped
+    if changes == 0:
+        # No usable edit came back (empty/malformed JSON, or output identical
+        # to the base CV). Shipping the base CV labeled "tailored" would be a
+        # silent lie — fail loudly so the queue records it and the user retries.
+        raise ClaudeCliError(
+            "tailoring produced no changes (model output was empty, malformed, "
+            "or identical to the base CV)")
     return tailored, changes
 
 
@@ -362,8 +369,12 @@ def humanize_cover_letter(body_text: str) -> str:
         logger.warning("humanizer pass failed (%s); using original draft", e)
         return body_text
     m = re.search(r"<LETTER>(.*?)</LETTER>", out, re.DOTALL)
-    result = (m.group(1) if m else out)
-    result = re.sub(r"</?LETTER>", "", result).strip()
+    if not m:
+        # Without the tags we can't tell letter from commentary ("Here is the
+        # rewritten letter: ...") — never ship raw model output as the letter.
+        logger.warning("humanizer output missing <LETTER> tags; keeping original draft")
+        return body_text
+    result = re.sub(r"</?LETTER>", "", m.group(1)).strip()
     # Backstop: the guide bans em/en dashes, but if any survived, soften them.
     result = re.sub(r"\s*[—–]\s*", ", ", result)
     result = re.sub(r",\s*,", ", ", result)
