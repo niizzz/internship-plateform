@@ -5,6 +5,11 @@ DB runs on BeeSite (Milch & Zucker) with a clean JSON API:
 returning paginated SearchResultItems. Descriptions aren't in the search
 payload, so we enrich the early-careers survivors via:
     GET https://api-deutschebank.beesite.de/jobhtml/<id>.json   -> {"html": ...}
+
+NB (measured 2026-07-24): `LanguageCode` in the payload only changes UI labels,
+NOT which requisitions come back — an EN sweep and a DE sweep return the exact
+same PositionID set (1802 vs 1802, 0 DE-only). So there is no separate German
+posting pool to chase; the single EN sweep is complete. Don't re-add a DE sweep.
 """
 from __future__ import annotations
 
