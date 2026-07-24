@@ -17,3 +17,6 @@ backend/debug_lazard/
 *.log
 .DS_Store
 .claude/settings.local.json
+
+# Claude Code local settings (any depth)
+**/.claude/settings.local.json
