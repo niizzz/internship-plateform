@@ -82,8 +82,10 @@ class SocGenScraper(BankScraper):
                     break
                 await page.wait_for_timeout(500)
             if not captured.get("auth"):
-                logger.warning("SocGen: could not capture proxy auth headers")
-                return []
+                # Total failure (bot wall / page changed) — raise so the
+                # orchestrator marks the bank FAILED instead of treating an
+                # empty list as "SocGen removed every posting".
+                raise RuntimeError("SocGen: could not capture proxy auth headers (bot wall?)")
 
             skip_from = 0
             total = None
@@ -136,9 +138,13 @@ class SocGenScraper(BankScraper):
         # Only European early-careers roles survive the orchestrator filter, so
         # only fetch descriptions for those (SocGen has ~1250 jobs of every kind;
         # enriching all program-matching ones was the slow tail). Capped for safety.
-        to_enrich = [o for o in offers.values()
-                     if o.apply_url and _PROGRAM_RE.search(o.role_title.lower())
-                     and in_europe(o.location or "")][:40]
+        eligible = [o for o in offers.values()
+                    if o.apply_url and _PROGRAM_RE.search(o.role_title.lower())
+                    and in_europe(o.location or "")]
+        to_enrich = eligible[:80]
+        if len(eligible) > len(to_enrich):
+            logger.warning("SocGen: enrich cap hit — %d of %d early-careers offers "
+                           "left without descriptions", len(eligible) - len(to_enrich), len(eligible))
         await self._enrich(to_enrich)
 
         logger.info("Société Générale: collected %d offers (%d enriched)", len(offers), len(to_enrich))

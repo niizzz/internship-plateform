@@ -56,7 +56,9 @@ class BofAScraper(BankScraper):
                     r.raise_for_status()
                     data = r.json()
                 except Exception as e:
-                    logger.warning("BofA start=%d failed: %s", start, e)
+                    if not offers:
+                        raise RuntimeError(f"Bank of America: page 1 failed: {e}") from e
+                    logger.warning("BofA start=%d failed (partial results kept): %s", start, e)
                     break
                 jobs = data.get("jobsList") or []
                 if not jobs:

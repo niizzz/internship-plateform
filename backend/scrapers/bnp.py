@@ -47,7 +47,9 @@ class BNPParibasScraper(BankScraper):
                     r.raise_for_status()
                     items = r.json()
                 except Exception as e:
-                    logger.warning("BNP UK page %d failed: %s", page, e)
+                    if not offers:
+                        raise RuntimeError(f"BNP Paribas: page 1 failed: {e}") from e
+                    logger.warning("BNP UK page %d failed (partial results kept): %s", page, e)
                     break
                 if not items:
                     break

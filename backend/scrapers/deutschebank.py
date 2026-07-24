@@ -65,7 +65,9 @@ class DeutscheBankScraper(BankScraper):
                     r.raise_for_status()
                     sr = r.json().get("SearchResult", {})
                 except Exception as e:
-                    logger.warning("DB search FirstItem=%d failed: %s", first, e)
+                    if not offers:
+                        raise RuntimeError(f"Deutsche Bank: page 1 failed: {e}") from e
+                    logger.warning("DB search FirstItem=%d failed (partial results kept): %s", first, e)
                     break
                 items = sr.get("SearchResultItems", []) or []
                 if not items:

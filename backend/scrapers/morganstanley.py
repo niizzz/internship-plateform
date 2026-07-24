@@ -60,7 +60,9 @@ class MorganStanleyScraper(BankScraper):
                         r.raise_for_status()
                         data = r.json()
                     except Exception as e2:
-                        logger.error("MS giving up: %s", e2)
+                        if not offers:
+                            raise RuntimeError(f"Morgan Stanley: first page failed after retry: {e2}")
+                        logger.error("MS giving up — returning %d partial offers: %s", len(offers), e2)
                         break
                 postings = data.get("jobPostings") or []
                 if not postings:

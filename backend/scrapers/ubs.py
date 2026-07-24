@@ -14,7 +14,7 @@ from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
 
 logger = logging.getLogger(__name__)
 
-MAX_DETAIL_PAGES = 10  # detail visits are Playwright navigations — keep bounded
+MAX_DETAIL_PAGES = 40  # detail visits are Playwright navigations — keep bounded
 MAX_LIST_PAGES = 10    # BrassRing pages; each next-click waits on the network
 
 LISTING_URL = "https://jobs.ubs.com/TGnewUI/Search/home/HomeWithPreLoad?partnerid=25008&siteid=5012&PageType=searchResults"
@@ -55,8 +55,11 @@ class UBSScraper(BankScraper):
 
         # The card only carries a truncated snippet; pull the full description
         # for likely early-careers roles from their detail pages.
-        to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
-        to_enrich = to_enrich[:MAX_DETAIL_PAGES]
+        eligible = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
+        to_enrich = eligible[:MAX_DETAIL_PAGES]
+        if len(eligible) > len(to_enrich):
+            logger.warning("UBS: enrich cap hit — %d early-careers offers left without "
+                           "descriptions", len(eligible) - len(to_enrich))
         if to_enrich:
             await self._enrich(to_enrich)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -46,16 +46,20 @@ class JPMorganScraper(BankScraper):
             # sweeps were the bulk of this scraper's runtime.
             sem = asyncio.Semaphore(4)
 
-            async def search(kw: str) -> list[dict[str, Any]]:
+            async def search(kw: str) -> Optional[list[dict[str, Any]]]:
                 async with sem:
                     try:
                         return await self._search_all(client, kw)
                     except Exception as e:
                         logger.warning("JPM query %r failed: %s", kw, e)
-                        return []
+                        return None  # None = request failure, [] = genuine empty
 
             results = await asyncio.gather(*(search(kw) for kw in QUERIES))
+            if all(r is None for r in results):
+                raise RuntimeError("JPMorgan: every keyword search failed (endpoint down/changed?)")
             for items in results:
+                if items is None:
+                    continue
                 for item in items:
                     job_id = str(item.get("Id") or "")
                     if not job_id or job_id in seen_ids:

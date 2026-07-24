@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -64,16 +64,20 @@ class LazardScraper(BankScraper):
         async with httpx.AsyncClient(timeout=30, headers=HEADERS) as client:
             sem = asyncio.Semaphore(4)
 
-            async def search(kw: str) -> list[dict[str, Any]]:
+            async def search(kw: str) -> Optional[list[dict[str, Any]]]:
                 async with sem:
                     try:
                         return await self._search(client, kw)
                     except Exception as e:
-                        logger.warning("Lazard query %r failed: %s", kw, e)
-                        return []
+                        logger.warning("%s query %r failed: %s", self.bank_name, kw, e)
+                        return None  # None = request failure, [] = genuine empty
 
             results = await asyncio.gather(*(search(kw) for kw in QUERIES))
+            if all(r is None for r in results):
+                raise RuntimeError(f"{self.bank_name}: every keyword search failed")
             for items in results:
+                if items is None:
+                    continue
                 for item in items:
                     jid = str(item.get("Id") or "")
                     if not jid or jid in seen:
@@ -106,18 +110,26 @@ class LazardScraper(BankScraper):
         return kept
 
     async def _enrich_one(self, client: httpx.AsyncClient, o: ScrapedOffer) -> None:
+        # Retried: the description decides Lazard-vs-LFG entity routing
+        # (_keep), so a transient miss here would flip the offer to the wrong
+        # bank for a whole refresh cycle (deactivation + notification noise).
         params = {
             "expand": "all", "onlyData": "true",
             "finder": f'ById;Id="{o.external_id}",siteNumber={SITE_NUMBER}',
         }
-        try:
-            r = await client.get(DETAILS_API, params=params)
-            if r.status_code != 200:
-                return
-            items = r.json().get("items", [])
-            desc = items[0].get("ExternalDescriptionStr") if items else None
-        except Exception:
-            return
+        desc = None
+        for attempt in range(3):
+            try:
+                r = await client.get(DETAILS_API, params=params)
+                if r.status_code != 200:
+                    raise RuntimeError(f"status {r.status_code}")
+                items = r.json().get("items", [])
+                desc = items[0].get("ExternalDescriptionStr") if items else None
+                break
+            except Exception:
+                if attempt == 2:
+                    return
+                await asyncio.sleep(1.0 * (attempt + 1))
         if desc:
             o.description = html_to_text(desc) or None
 

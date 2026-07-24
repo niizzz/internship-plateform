@@ -80,6 +80,11 @@ class HSBCScraper(BankScraper):
                         return ""
 
             pages = await asyncio.gather(*(search(kw) for kw in QUERIES))
+            if not any(pages):
+                # Every keyword request failed — the board is unreachable or
+                # moved. Raise so this counts as a FAILED scrape, not "HSBC
+                # removed everything".
+                raise RuntimeError("HSBC: all search requests failed")
             for text in pages:
                 for card in _CARD_RE.findall(text):
                     tm = _TITLE_RE.search(card)
@@ -111,6 +116,13 @@ class HSBCScraper(BankScraper):
             await self._enrich(client, to_enrich)
 
         logger.info("HSBC: collected %d EU offers (%d enriched)", len(offers), len(to_enrich))
+        # KNOWN COVERAGE GAP (verified live 2026-07-21): mycareer.hsbc.com's
+        # SearchJobs is the service-centre/experienced board — London Global
+        # Markets STUDENT programmes live on a separate Avature tenant
+        # (hsbc.avature.net, JS-only SPA, search path not yet captured). Until
+        # that board is wired in, HSBC S&T internships will NOT appear here.
+        logger.warning("HSBC: scraping the experienced/GSC board only — student "
+                       "Global Markets roles are NOT visible (known gap)")
         return list(offers.values())
 
     async def _enrich(self, client: httpx.AsyncClient, offers: list[ScrapedOffer]) -> None:

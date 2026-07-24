@@ -64,7 +64,9 @@ class SantanderScraper(BankScraper):
                     r.raise_for_status()
                     data = r.json()
                 except Exception as e:
-                    logger.warning("Santander offset=%d failed: %s", offset, e)
+                    if not offers:
+                        raise RuntimeError(f"Santander: page 1 failed: {e}") from e
+                    logger.warning("Santander offset=%d failed (partial results kept): %s", offset, e)
                     break
                 postings = data.get("jobPostings") or []
                 if not postings:

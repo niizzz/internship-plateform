@@ -91,7 +91,9 @@ class NatixisScraper(BankScraper):
                     r.raise_for_status()
                     data = r.json().get("data", {})
                 except Exception as e:
-                    logger.warning("Natixis from=%d failed: %s", frm, e)
+                    if not offers:
+                        raise RuntimeError(f"Natixis: page 1 failed: {e}") from e
+                    logger.warning("Natixis from=%d failed (partial results kept): %s", frm, e)
                     break
                 items = data.get("items") or []
                 if not items:

@@ -78,7 +78,12 @@ class CitiScraper(BankScraper):
                         except Exception as e2:
                             logger.warning("  retry after %ss failed: %s", backoff, e2)
                     if not succeeded:
-                        logger.error("Citi giving up at offset=%d", offset)
+                        if not offers:
+                            # Nothing collected at all — fail the scrape so the
+                            # orchestrator never treats this as "Citi is empty".
+                            raise RuntimeError("Citi: first page failed after retries")
+                        logger.error("Citi giving up at offset=%d — returning %d partial offers",
+                                     offset, len(offers))
                         break
                 postings = data.get("jobPostings", [])
                 if not postings:

@@ -72,8 +72,10 @@ class GoldmanScraper(BankScraper):
             sweeps: list[tuple[str, list[str]]] = [("", ["EARLY_CAREER"]), ("", ["CAMPUS"])]
             sweeps += [(kw, ["PROFESSIONAL"]) for kw in KEYWORDS if kw]
             sem = asyncio.Semaphore(3)
+            ok_requests = 0
 
             async def sweep(kw: str, exp: list[str]) -> None:
+                nonlocal ok_requests
                 async with sem:
                     page_n = 0
                     while True:
@@ -97,6 +99,7 @@ class GoldmanScraper(BankScraper):
                         except Exception as e:
                             logger.warning("GS kw=%r exp=%s page=%d failed: %s", kw, exp, page_n, e)
                             break
+                        ok_requests += 1
                         items = data.get("items") or []
                         for it in items:
                             self._collect(it, offers)
@@ -107,6 +110,8 @@ class GoldmanScraper(BankScraper):
                         await asyncio.sleep(0.2)
 
             await asyncio.gather(*(sweep(kw, exp) for kw, exp in sweeps))
+            if ok_requests == 0:
+                raise RuntimeError("Goldman Sachs: every GraphQL sweep failed")
 
             # Fetch full descriptions for likely early-careers roles — the
             # search payload has no description, and without one generic titles
@@ -148,8 +153,13 @@ class GoldmanScraper(BankScraper):
         await asyncio.gather(*(one(o) for o in offers))
 
     def _collect(self, it: dict[str, Any], out: dict[str, ScrapedOffer]) -> None:
+        # Dedupe on ext_id (what becomes Offer.external_id): keying on roleId
+        # while persisting sourceId could emit two ScrapedOffers with the same
+        # external_id when a posting appears in two sweeps under different
+        # roleIds — a within-batch duplicate.
         role_id = str(it.get("roleId") or it.get("externalSource", {}).get("sourceId") or "")
-        if not role_id or role_id in out:
+        ext_id = str(it.get("externalSource", {}).get("sourceId") or role_id)
+        if not ext_id or ext_id in out:
             return
         locs = it.get("locations") or []
         # Drop unless at least one location is in Europe.
@@ -158,8 +168,7 @@ class GoldmanScraper(BankScraper):
             return
         title = it.get("jobTitle") or ""
         loc_str = ", ".join(filter(None, [eu_loc.get("city"), eu_loc.get("state"), eu_loc.get("country")]))
-        ext_id = str(it.get("externalSource", {}).get("sourceId") or role_id)
-        out[role_id] = ScrapedOffer(
+        out[ext_id] = ScrapedOffer(
             bank="Goldman Sachs",
             external_id=ext_id,
             role_title=title,

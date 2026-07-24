@@ -59,7 +59,9 @@ class RothschildScraper(BankScraper):
                     r.raise_for_status()
                     data = r.json()
                 except Exception as e:
-                    logger.warning("Rothschild offset=%d failed: %s", offset, e)
+                    if not offers:
+                        raise RuntimeError(f"Rothschild & Co: page 1 failed: {e}") from e
+                    logger.warning("Rothschild offset=%d failed (partial results kept): %s", offset, e)
                     break
                 postings = data.get("jobPostings") or []
                 if not postings:

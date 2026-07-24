@@ -104,20 +104,30 @@ class WorkdayScraper(BankScraper):
         }
         facet_mode = bool(self.country_facet and self.europe_country_ids)
         offers: dict[str, ScrapedOffer] = {}
+        sweeps_tried = sweeps_ok = 0
         async with httpx.AsyncClient(timeout=30, headers=headers) as client:
             for site in self._site_list():
                 if facet_mode:
+                    sweeps_tried += 1
                     try:
                         await self._sweep_facet(client, site, offers)
+                        sweeps_ok += 1
                     except Exception as e:
                         logger.warning("%s Workday %s facet sweep failed: %s", self.bank_name, site, e)
                     continue
                 for kw in self.queries:
+                    sweeps_tried += 1
                     try:
                         await self._search(client, site, kw, offers)
+                        sweeps_ok += 1
                     except Exception as e:
                         logger.warning("%s Workday %s/%r failed: %s", self.bank_name, site, kw, e)
                     await asyncio.sleep(0.2)
+            if sweeps_tried and sweeps_ok == 0:
+                # Every request failed — endpoint down/changed/rate-limited.
+                # Raise so the orchestrator records a FAILED scrape instead of
+                # deactivating the bank's offers as "removed".
+                raise RuntimeError(f"{self.bank_name}: all {sweeps_tried} Workday sweeps failed")
 
             to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
             await self._enrich(client, to_enrich)
@@ -289,7 +299,10 @@ class TalentsoftScraper(BankScraper):
                     r = await client.get(url)
                     r.raise_for_status()
                 except Exception as e:
-                    logger.warning("%s Talentsoft list page %d failed: %s", self.bank_name, page, e)
+                    if page == 1:
+                        raise RuntimeError(f"{self.bank_name}: Talentsoft page 1 failed: {e}") from e
+                    logger.warning("%s Talentsoft list page %d failed (partial results kept): %s",
+                                   self.bank_name, page, e)
                     break
                 if not self._parse_list(r.text, offers):
                     break

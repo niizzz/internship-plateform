@@ -50,6 +50,7 @@ class BarclaysScraper(BankScraper):
 
     async def scrape(self) -> list[ScrapedOffer]:
         offers: dict[str, ScrapedOffer] = {}
+        pages_with_cards = 0
         for kw in QUERIES:
             kw_path = urllib.parse.quote(kw)
             kw_added = 0
@@ -76,6 +77,7 @@ class BarclaysScraper(BankScraper):
                             await page.wait_for_timeout(1500)
                     if not cards:
                         break  # no more results → next keyword
+                    pages_with_cards += 1
 
                     new = 0
                     for c in cards:
@@ -99,17 +101,27 @@ class BarclaysScraper(BankScraper):
                             extras={"detail_url": c["href"]},
                         )
                     kw_added += new
-                    if new == 0:
-                        break  # page added nothing new/EU → stop paginating this kw
+                    # NB: keep paginating even when a page adds nothing new/EU —
+                    # a page of all-US results used to stop the whole keyword.
                     await asyncio.sleep(0.2)
             finally:
                 await page.close()
             logger.info("Barclays kw=%r added %d EU offers", kw, kw_added)
 
+        if pages_with_cards == 0:
+            # Every keyword on every page served zero job cards: Phenom always
+            # lists thousands of jobs, so this is a bot wall or layout change,
+            # not an empty board. Fail the scrape rather than "succeed" empty.
+            raise RuntimeError("Barclays: no result cards on any page (bot wall / layout change?)")
+
         # Enrichment is serial Playwright navigation — cap it so the tail can't
         # blow the refresh budget (the S&T filter only needs a description for
         # generic-titled roles anyway).
-        to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())][:12]
+        eligible = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
+        to_enrich = eligible[:24]
+        if len(eligible) > len(to_enrich):
+            logger.warning("Barclays: enrich cap hit — %d early-careers offers left "
+                           "without descriptions", len(eligible) - len(to_enrich))
         if to_enrich:
             page = await self.new_page()
             try:
