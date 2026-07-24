@@ -72,6 +72,8 @@ Owner: Nizar (user's spelling "plateform" is intentional).
 - KNOWN GAP: HSBC scraper reads the experienced/GSC board; student Global
   Markets programmes live on hsbc.avature.net (JS SPA, search path never
   captured — needs a live Playwright dig). It logs this every refresh.
+- NEXT BANK WORK: see `NEXT_BANKS.md` (HSBC repoint, DB German sweep,
+  UniCredit + Mizuho discovery/implementation, Rothschild verification).
 - Sept–Nov 2026 is the posting season for GS/JPM/MS/Citi/UBS/BofA/HSBC summer
   2027 internships — expect offer volume to jump; enrich caps log truncation.
 - Deferred nice-to-haves: dry-run mode for apply-assist; surface per-offer
