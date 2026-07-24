@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from db import (
     ENGINE, Offer, Notification, NotificationKind, Category, ProgramType,
+    ScraperState,
 )
 from .base import (
     BankScraper, ScrapedOffer, is_snt_role, is_internship_or_grad,
@@ -155,6 +156,12 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
 
         for s in scraped:
             key = (s.bank, s.external_id)
+            if key in seen_keys:
+                # Same (bank, external_id) twice in one batch (a scraper-side
+                # dedupe slip): first wins. Inserting both would create a ghost
+                # row that the by-key index below can never update or deactivate.
+                logger.warning("persist: duplicate key in batch, skipping %s", key)
+                continue
             seen_keys.add(key)
             existing = existing_all.get(key)
             if existing:
@@ -206,9 +213,49 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
         # set; fall back to banks present in the filtered results.
         if scraped_banks is None:
             scraped_banks = {s.bank for s in scraped}
+
+        # Zero-yield guard: a scrape that "succeeded" with ZERO kept offers while
+        # the bank still has active rows is far more often a silently-broken
+        # scraper (bot wall, layout change, swallowed request errors) than a bank
+        # genuinely pulling every posting overnight. Require TWO consecutive
+        # zero-yield scrapes before trusting the wipe. A real full-wipe is only
+        # delayed by one refresh; a transient failure no longer destroys the
+        # bank's listings (and, via notification dismissal, their history).
+        kept_by_bank: dict[str, int] = {}
+        for s in scraped:
+            kept_by_bank[s.bank] = kept_by_bank.get(s.bank, 0) + 1
+        active_by_bank: dict[str, int] = {}
+        for (bank, _eid), offer in existing_all.items():
+            if offer.is_active:
+                active_by_bank[bank] = active_by_bank.get(bank, 0) + 1
+
+        suspect_zero: list[str] = []
+        trusted_banks: set[str] = set()
+        for bank in scraped_banks:
+            kept = kept_by_bank.get(bank, 0)
+            state = session.get(ScraperState, bank)
+            if state is None:
+                state = ScraperState(bank=bank)
+            if kept == 0 and active_by_bank.get(bank, 0) > 0:
+                state.zero_streak += 1
+                if state.zero_streak < 2:
+                    suspect_zero.append(bank)
+                    logger.warning(
+                        "persist: %s returned 0 offers but has %d active — "
+                        "holding deactivation (zero-streak %d/2)",
+                        bank, active_by_bank.get(bank, 0), state.zero_streak)
+                else:
+                    trusted_banks.add(bank)
+                    state.zero_streak = 0
+            else:
+                state.zero_streak = 0
+                trusted_banks.add(bank)
+            state.updated_at = now
+            session.add(state)
+
         removed_offers: list[Offer] = []
         for (bank, _eid), offer in existing_all.items():
-            if offer.is_active and bank in scraped_banks and (bank, offer.external_id) not in seen_keys:
+            if offer.is_active and bank in trusted_banks and (bank, offer.external_id) not in seen_keys:
                 removed_offers.append(offer)
 
         for offer in removed_offers:
@@ -235,6 +282,7 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
         "updated": updated,
         "removed": len(removed_offers) if 'removed_offers' in locals() else 0,
         "scraped_banks": sorted(scraped_banks),
+        "suspect_zero": sorted(suspect_zero) if 'suspect_zero' in locals() else [],
         "total_kept_after_filter": len(scraped),
     }
 
@@ -255,7 +303,7 @@ async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
     agg = {
         "inserted": 0, "updated": 0, "removed": 0,
         "total_kept_after_filter": 0, "scraped_banks": [], "failed": [],
-        "done": 0, "total": total,
+        "suspect_zero": [], "done": 0, "total": total,
     }
 
     def report():
@@ -281,6 +329,7 @@ async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
                 agg["removed"] += res["removed"]
                 agg["total_kept_after_filter"] += res["total_kept_after_filter"]
                 agg["scraped_banks"].append(bank)
+                agg["suspect_zero"].extend(res.get("suspect_zero") or [])
             except Exception as e:
                 logger.exception("persist failed for %s: %s", bank, e)
                 agg["failed"].append(bank)

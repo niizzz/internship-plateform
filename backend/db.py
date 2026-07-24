@@ -3,13 +3,32 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, event
 from sqlmodel import Field, SQLModel, create_engine, Session
 
 DB_DIR = Path(__file__).parent / "data"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "internships.db"
-ENGINE = create_engine(f"sqlite:///{DB_PATH}", echo=False, connect_args={"check_same_thread": False})
+
+
+def configure_engine(engine) -> None:
+    """SQLite durability for a multi-threaded writer mix (refresh persists,
+    tailor worker, apply-assist background threads, API threadpool): WAL lets
+    readers proceed during a write, and a generous busy_timeout turns "database
+    is locked" hard failures into short waits."""
+    @event.listens_for(engine, "connect")
+    def _pragmas(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA busy_timeout=30000")
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.close()
+
+
+ENGINE = create_engine(
+    f"sqlite:///{DB_PATH}", echo=False,
+    connect_args={"check_same_thread": False, "timeout": 30},
+)
+configure_engine(ENGINE)
 
 
 class Category(str, Enum):
@@ -84,6 +103,20 @@ class TailoredDocument(SQLModel, table=True):
     file_path: str
     model: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Content fingerprint of the inputs this document was generated from
+    # (base_cv.json + offer title/description). A mismatch means the document
+    # is stale and must be regenerated — see main._tailor_fingerprint.
+    fingerprint: Optional[str] = None
+
+
+class ScraperState(SQLModel, table=True):
+    """Per-bank scrape bookkeeping. `zero_streak` counts consecutive successful
+    scrapes that returned zero kept offers while the bank still had active rows
+    — used to distinguish "the bank really pulled everything" from "the scraper
+    silently broke" before deactivating listings."""
+    bank: str = Field(primary_key=True)
+    zero_streak: int = Field(default=0)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Notification(SQLModel, table=True):
@@ -169,11 +202,37 @@ def _migrate_offer(conn) -> None:
         conn.exec_driver_sql('ALTER TABLE offer ADD COLUMN "posted_at" DATETIME')
 
 
+def _migrate_tailoreddocument(conn) -> None:
+    cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(tailoreddocument)").fetchall()}
+    if "fingerprint" not in cols:
+        conn.exec_driver_sql('ALTER TABLE tailoreddocument ADD COLUMN "fingerprint" TEXT')
+
+
+def _data_fixes(conn) -> None:
+    # A not_applied row must not carry an applied_at: stale timestamps (left by
+    # the July status reset) would resurface as the application date if the
+    # offer is applied to later, corrupting the dashboard series.
+    conn.exec_driver_sql(
+        "UPDATE application SET applied_at=NULL WHERE status='not_applied' AND applied_at IS NOT NULL")
+    # One row per posting per bank — persist() also guards this in-batch, but a
+    # unique index makes the invariant durable.
+    try:
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_offer_bank_external ON offer(bank, external_id)")
+    except Exception:
+        # Pre-existing duplicate rows would make this fail; keep starting up.
+        import logging
+        logging.getLogger(__name__).warning(
+            "could not create unique offer index (duplicate rows present?)")
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(ENGINE)
     with ENGINE.begin() as conn:
         _migrate_settings(conn)
         _migrate_offer(conn)
+        _migrate_tailoreddocument(conn)
+        _data_fixes(conn)
     # Ensure single Settings row exists.
     with Session(ENGINE) as s:
         if not s.get(Settings, 1):
