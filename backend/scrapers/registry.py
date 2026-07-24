@@ -45,6 +45,7 @@ from .amundi import AmundiScraper
 from .lazard_fg import LazardFreresGestionScraper
 from .maven import MavenSecuritiesScraper
 from .unicredit import UniCreditScraper
+from .mizuho import MizuhoScraper
 
 ALL_SCRAPERS: list[type[BankScraper]] = [
     JPMorganScraper,
@@ -74,6 +75,7 @@ ALL_SCRAPERS: list[type[BankScraper]] = [
     LazardFreresGestionScraper,
     MavenSecuritiesScraper,
     UniCreditScraper,
+    MizuhoScraper,
 ]
 
 
