@@ -389,24 +389,33 @@ def is_internship_or_grad(title: str, description: str = "") -> bool:
 
 
 def parse_location(raw: str) -> tuple[Optional[str], Optional[str]]:
-    """Return (city, country) best-effort from a free-form location string."""
+    """Return (city, country) best-effort from a free-form location string.
+
+    Matches are whole-word: bare substring matching classified "Ukraine" (and
+    even "Fukuoka") as the UK, and "Jerome St" as Rome.
+    """
     if not raw:
         return None, None
     text = raw.lower()
     city = None
     for c in EUROPE_CITIES:
-        if c in text:
+        if re.search(r"(?<![a-zà-ÿ])" + re.escape(c) + r"(?![a-zà-ÿ])", text):
             city = c.title()
             break
     country = None
     for c in EUROPE_COUNTRIES:
-        if c.lower() in text:
+        if re.search(r"(?<![a-zà-ÿ])" + re.escape(c.lower()) + r"(?![a-zà-ÿ])", text):
             country = c
             break
     # Heuristic country-from-city if country missing
     if country is None and city:
         city_country = {
             "London": "United Kingdom", "Edinburgh": "United Kingdom",
+            "Birmingham": "United Kingdom", "Glasgow": "United Kingdom",
+            "Manchester": "United Kingdom",
+            "Lugano": "Switzerland",
+            "The Hague": "Netherlands",
+            "Roma": "Italy",
             "Paris": "France", "La Défense": "France", "La Defense": "France", "Courbevoie": "France",
             "Frankfurt": "Germany", "Berlin": "Germany", "Munich": "Germany", "München": "Germany",
             "Zurich": "Switzerland", "Zürich": "Switzerland", "Geneva": "Switzerland", "Basel": "Switzerland",

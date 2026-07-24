@@ -132,8 +132,11 @@ def build_field_values(profile: dict) -> list[list]:
 
     # Right-to-work answers depend on where the job is (main.py passes
     # offer_country): user can work in the EU, needs sponsorship for UK/CH.
+    # "Unknown" (location parse failure) must yield NO answer at all — the
+    # truthy string used to fall through to "no sponsorship needed", silently
+    # pre-selecting a wrong visa answer on UK/CH applications.
     oc = (profile.get("offer_country") or "").strip().lower()
-    needs_sponsor: Optional[bool] = (oc in _UK_CH) if oc else None
+    needs_sponsor: Optional[bool] = (oc in _UK_CH) if oc and oc != "unknown" else None
 
     rules: list[list] = []
 
