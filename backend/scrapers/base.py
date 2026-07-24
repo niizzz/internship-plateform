@@ -177,6 +177,9 @@ _STRONG_SNT = re.compile(
     # Desks / asset classes
     r"ficc|\bfic\b|fixed income(?:\s+sales|\s+trading|\s+division)?|"
     r"equity derivatives|equities trading|equities sales|equities division|"
+    # "equity sales" (singular) + Redburn, Rothschild's cash-equities broker arm
+    # — both unambiguous S&T. "(?<!private )" keeps "private equity sales" out.
+    r"(?<!private )equity\s+sales|\bredburn\b|"
     r"interest rate(?:s)?\s+(?:trad|sales|product|deriv)|"
     r"\brates\s+(?:trad(?:er|ing)|sales|desk|product|structuring|strategist)|"
     r"\bfx\b|forex|foreign exchange|fx trading|fx sales|fx options|"
@@ -220,7 +223,7 @@ _VERY_STRONG_SNT = re.compile(
     r"sales\s*(?:&|and)\s*trading|\bs\s*&\s*t\b|"
     r"ficc|\bfic\b|"
     r"fixed income\s+(?:sales|trading|desk)|"
-    r"equity derivatives|equities\s+(?:trading|sales)|"
+    r"equity derivatives|equities\s+(?:trading|sales)|(?<!private )equity\s+sales|\bredburn\b|"
     r"\brates\s+(?:trading|sales|desk|structuring)|"
     r"fx\s+(?:trading|sales|options)|foreign exchange\s+(?:trading|sales)|"
     r"credit\s+(?:trading|sales|flow)|"
