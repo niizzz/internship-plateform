@@ -33,6 +33,14 @@ from cv_render import render_cv_pdf, render_cover_letter_pdf, flatten_cv_text
 from llm import tailor_cv_json, generate_cover_letter, ClaudeCliError, is_usage_limit_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# Persist logs: the console lives in a minimized launcher window and every
+# warning (silent scraper failures, tailoring errors) vanished with it.
+from logging.handlers import RotatingFileHandler as _RFH
+_LOG_DIR = Path(__file__).parent / "data"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_fh = _RFH(_LOG_DIR / "app.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(_fh)
 logger = logging.getLogger(__name__)
 
 BACKEND_DIR = Path(__file__).parent
@@ -141,6 +149,7 @@ class SettingsOut(BaseModel):
     base_cv_filename: Optional[str]
     base_cover_letter_filename: Optional[str] = None
     extra_documents: list[ExtraDocOut] = []
+    warning: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -255,7 +264,11 @@ def update_application(offer_id: int, update: ApplicationUpdate, session: Sessio
         session.add(app_row)
     if update.status is not None:
         app_row.status = update.status
-        if update.status != ApplicationStatus.not_applied and app_row.applied_at is None:
+        if update.status == ApplicationStatus.not_applied:
+            # Reverting to not-applied must clear the timestamp, or a later
+            # re-apply would inherit a stale date and skew the dashboard.
+            app_row.applied_at = None
+        elif app_row.applied_at is None:
             app_row.applied_at = datetime.utcnow()
     if update.notes is not None:
         app_row.notes = update.notes
@@ -267,6 +280,26 @@ def update_application(offer_id: int, update: ApplicationUpdate, session: Sessio
 
 
 # ---------- Refresh ---------------------------------------------------------
+
+def _append_refresh_history(result: dict) -> None:
+    """One JSON line per refresh (data/refresh_history.jsonl) so failure
+    patterns ("SocGen has failed 5 refreshes running") are visible after the
+    console window is long gone. Best-effort — never breaks a refresh."""
+    try:
+        line = json.dumps({
+            "at": datetime.utcnow().isoformat(),
+            "scraped": result.get("scraped_banks"),
+            "failed": result.get("failed"),
+            "suspect_zero": result.get("suspect_zero"),
+            "inserted": result.get("inserted"),
+            "updated": result.get("updated"),
+            "removed": result.get("removed"),
+        }, ensure_ascii=False)
+        with open(BACKEND_DIR / "data" / "refresh_history.jsonl", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        logger.debug("could not append refresh history", exc_info=True)
+
 
 async def _do_refresh():
     global _last_refresh
@@ -288,6 +321,7 @@ async def _do_refresh():
                 "finished_at": datetime.utcnow(),
                 "result": result,
             }
+            _append_refresh_history(result)
             # No auto-tailoring after refresh (user's choice 2026-07-07):
             # documents are generated on demand when the user clicks Apply.
             # POST /api/tailor/run still exists for a manual bulk run.
@@ -361,6 +395,27 @@ class TailorResponse(BaseModel):
 
 BASE_CV_JSON = CV_DIR / "base_cv.json"
 
+import hashlib as _hashlib
+
+
+def _tailor_fingerprint(o: Offer, base_bytes: Optional[bytes] = None) -> str:
+    """Content hash of everything a tailored document is derived from: the
+    structured base CV and the offer's title + description. A mismatch against
+    TailoredDocument.fingerprint means the stored PDF is stale (base CV was
+    re-transcribed, or the bank edited the posting) and must be regenerated."""
+    if base_bytes is None:
+        try:
+            base_bytes = BASE_CV_JSON.read_bytes()
+        except OSError:
+            base_bytes = b""
+    h = _hashlib.sha256()
+    h.update(base_bytes)
+    h.update(b"\x00")
+    h.update((o.role_title or "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update((o.description or "").encode("utf-8"))
+    return h.hexdigest()[:32]
+
 
 def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> TailorResponse:
     """Generate tailored CV + cover letter (both PDF) for one offer via the
@@ -416,7 +471,9 @@ def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> Tailor
     # Assemble a readable full-letter preview for the UI (the PDF adds the letterhead).
     cl_text = f"{letter_date}\n\n{o.bank}\nRecruiting Team\n\n{greeting}\n\n{cl_body}\n\n{signoff}\n{base_cv.get('name')}"
 
-    # Upsert TailoredDocument rows.
+    # Upsert TailoredDocument rows, stamped with the input fingerprint so a
+    # later base-CV or posting change invalidates them.
+    fp = _tailor_fingerprint(o)
     for kind, path in ((DocumentKind.cv, cv_out), (DocumentKind.cover_letter, cl_out)):
         existing = session.exec(
             select(TailoredDocument).where(
@@ -427,9 +484,11 @@ def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> Tailor
             existing.file_path = str(path)
             existing.model = "claude-cli"
             existing.created_at = datetime.utcnow()
+            existing.fingerprint = fp
         else:
             session.add(TailoredDocument(
                 offer_id=o.id, kind=kind, file_path=str(path), model="claude-cli",
+                fingerprint=fp,
             ))
     session.commit()
 
@@ -478,10 +537,17 @@ _tailor_state: dict = {
 def _offers_needing_tailoring() -> list[int]:
     with Session(ENGINE) as session:
         offers = session.exec(select(Offer).where(Offer.is_active == True)).all()  # noqa: E712
+        try:
+            base_bytes = BASE_CV_JSON.read_bytes()
+        except OSError:
+            base_bytes = b""
+        fp_by_offer = {o.id: _tailor_fingerprint(o, base_bytes) for o in offers}
         have_both: set[int] = set()
         kinds_by_offer: dict[int, set] = {}
         for d in session.exec(select(TailoredDocument)).all():
-            if Path(d.file_path).exists():
+            # A document only counts if its file exists AND it was generated
+            # from the current base CV + posting text (fingerprint match).
+            if Path(d.file_path).exists() and d.fingerprint == fp_by_offer.get(d.offer_id):
                 kinds_by_offer.setdefault(d.offer_id, set()).add(d.kind)
         for oid, kinds in kinds_by_offer.items():
             if DocumentKind.cv in kinds and DocumentKind.cover_letter in kinds:
@@ -566,11 +632,9 @@ def download_document(offer_id: int, kind: DocumentKind, session: Session = Depe
     ).first()
     if not doc or not Path(doc.file_path).exists():
         raise HTTPException(404, "Document not found")
-    return FileResponse(
-        doc.file_path,
-        filename=Path(doc.file_path).name,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
+    media = "application/pdf" if doc.file_path.lower().endswith(".pdf") else \
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return FileResponse(doc.file_path, filename=Path(doc.file_path).name, media_type=media)
 
 
 # ---------- Notifications ---------------------------------------------------
@@ -592,15 +656,31 @@ def dismiss_notification(notif_id: int, session: Session = Depends(get_session))
     if not n:
         raise HTTPException(404, "Notification not found")
     n.dismissed = True
-    # Also hard-delete the offer (and dependent rows) per user request.
+    # Hard-delete the offer per user request — but ONLY when there is no
+    # application history attached. An offer you applied to (or interviewed
+    # at) stays in the DB as an inactive archive: deleting it would silently
+    # erase funnel history and tailored documents, which is unrecoverable if
+    # the "removed" notification was itself a scraper glitch.
     if n.offer_id:
         offer = session.get(Offer, n.offer_id)
         if offer:
-            for app_row in session.exec(select(Application).where(Application.offer_id == offer.id)).all():
-                session.delete(app_row)
-            for d in session.exec(select(TailoredDocument).where(TailoredDocument.offer_id == offer.id)).all():
-                session.delete(d)
-            session.delete(offer)
+            app_row = session.exec(
+                select(Application).where(Application.offer_id == offer.id)).first()
+            has_history = app_row is not None and app_row.status != ApplicationStatus.not_applied
+            if has_history:
+                offer.is_active = False
+            else:
+                if app_row:
+                    session.delete(app_row)
+                for d in session.exec(select(TailoredDocument).where(TailoredDocument.offer_id == offer.id)).all():
+                    try:  # best-effort file cleanup; the row goes regardless
+                        p = Path(d.file_path)
+                        if p.is_file() and OFFERS_DIR in p.parents:
+                            p.unlink()
+                    except OSError:
+                        pass
+                    session.delete(d)
+                session.delete(offer)
     session.add(n)
     session.commit()
     return {"ok": True}
@@ -653,7 +733,16 @@ async def upload_base_cv(file: UploadFile = File(...), session: Session = Depend
         session.add(s)
     s.base_cv_path = str(target)
     session.commit()
-    return get_settings(session)
+    out = get_settings(session)
+    # Tailoring renders from the structured base_cv.json, which this upload
+    # does NOT regenerate — without this warning the user believes new uploads
+    # flow into tailored documents, and they silently don't.
+    out.warning = (
+        "Heads up: tailored CVs are generated from storage/cvs/base_cv.json, "
+        "which is NOT derived from this upload. If the CV content changed, "
+        "base_cv.json must be re-transcribed for tailoring to pick it up."
+    )
+    return out
 
 
 @app.post("/api/settings/base-cover-letter", response_model=SettingsOut)
@@ -758,6 +847,11 @@ def _resolve_doc_path(session: Session, offer_id: int, kind: DocumentKind, sourc
     ).first()
     if not doc:
         return None
+    # Stale documents (generated from an older base CV or an older version of
+    # the posting) are treated as missing so callers regenerate them.
+    o = session.get(Offer, offer_id)
+    if o is not None and doc.fingerprint != _tailor_fingerprint(o):
+        return None
     p = Path(doc.file_path)
     return p if p.exists() else None
 
@@ -857,6 +951,9 @@ async def apply_assist(
                             docs_holder["cl"] = str(clp)
                 logger.info("apply-assist: background tailoring ready for offer %s", offer_id)
             except Exception as e:
+                # Surface the failure to the assist tab: the badge otherwise
+                # promises "documents will attach automatically" forever.
+                docs_holder["failed"] = str(e)[:200]
                 logger.warning("apply-assist: background tailoring failed for offer %s: %s", offer_id, e)
         _threading.Thread(target=_bg_tailor, daemon=True).start()
 

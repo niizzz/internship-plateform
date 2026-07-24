@@ -1610,9 +1610,15 @@ async def run_assist(
                                             extra_docs, state, profile)
             pending = docs_holder is not None and (docs_holder.get("cv") is None
                                                    or docs_holder.get("cl") is None)
+            gen_failed = docs_holder is not None and docs_holder.get("failed")
+            if gen_failed:
+                doc_note = " — DOCUMENT GENERATION FAILED, attach CV/cover letter manually"
+            elif pending:
+                doc_note = " — CV/cover letter still generating, they'll attach automatically"
+            else:
+                doc_note = ""
             badge = (f"Internship DB: auto-filled {total_filled} field(s)"
-                     + (" — CV/cover letter still generating, they'll attach automatically"
-                        if pending else "")
+                     + doc_note
                      + " — review everything, then submit yourself")
             try:
                 await page.evaluate(_BADGE_JS, badge)
