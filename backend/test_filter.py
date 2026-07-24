@@ -93,6 +93,10 @@ GATE_CASES = [
     ("London - Long Internship 2026 - FIC Off-Cycle", "", "London", True, "BNP FIC"),
     ("Stage - Equity Sales - Rothschild & Co Redburn - Septembre 2026", "", "Paris, France",
      True, "Rothschild Redburn equity-sales intern (live)"),
+    ("Tirocinio Global Markets Structuring - Milano", "", "Milan, Italy", True,
+     "UniCredit Italian tirocinio S&T"),
+    ("Working Student Markets Trading (m/f/d)", "", "Munich, Germany", True,
+     "UniCredit German working-student S&T"),
     # DROP — full-time roles whose DESCRIPTION mentions intern/grad boilerplate
     ("Fixed Income Analyst", "We also run a summer internship programme.", "London",
      False, "FT analyst, desc-only intern word"),

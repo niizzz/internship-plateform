@@ -371,8 +371,10 @@ _PROGRAM_RE = re.compile(
     r"analyst\s+(?:programme|program|scheme)|"
     r"apprentice(?:ship)?|apprenti|trainee|"
     r"stagiaire|stage|vie\b|alternance|alternant(?:e)?|"
+    # Italian intern terms (UniCredit / Italian postings)
+    r"tirocin(?:io|ante|i)|"
     # German early-careers terms (Deutsche Bank, German postings)
-    r"praktikum|praktikant(?:in)?|werkstudent(?:in)?|"
+    r"praktikum|praktikant(?:in)?|werkstudent(?:in)?|working\s+student|"
     r"early\s+careers?|emerging\s+talent|"
     r"work\s+(?:placement|experience)"
     r")\b"

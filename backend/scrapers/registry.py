@@ -44,6 +44,7 @@ from .cmc import CMCMarketsScraper
 from .amundi import AmundiScraper
 from .lazard_fg import LazardFreresGestionScraper
 from .maven import MavenSecuritiesScraper
+from .unicredit import UniCreditScraper
 
 ALL_SCRAPERS: list[type[BankScraper]] = [
     JPMorganScraper,
@@ -72,6 +73,7 @@ ALL_SCRAPERS: list[type[BankScraper]] = [
     AmundiScraper,
     LazardFreresGestionScraper,
     MavenSecuritiesScraper,
+    UniCreditScraper,
 ]
 
 
