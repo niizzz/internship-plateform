@@ -42,18 +42,42 @@ export default function RefreshButton() {
     ? (typeof done === 'number' && typeof total === 'number' ? `Scraping ${done}/${total}…` : 'Scraping…')
     : 'Refresh'
 
+  // Surface scraper health: failed banks + banks held by the zero-yield guard.
+  // A silent scraper failure looking identical to "no news" was an audit finding.
+  const failed: string[] = status?.result?.failed ?? []
+  const suspect: string[] = status?.result?.suspect_zero ?? []
+  const showHealth = !running && status?.status === 'done' && (failed.length > 0 || suspect.length > 0)
+
   return (
-    <button
-      onClick={() => trigger.mutate()}
-      disabled={running}
-      className="btn-neon px-3 py-1.5 rounded-md bg-gradient-to-r from-neon-cyan/15 to-neon-violet/15 border border-ink-600 text-neon-cyan text-xs font-semibold uppercase tracking-wider hover:border-neon-cyan/50 disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-      title={status?.implemented_scrapers?.length
-        ? `Scrapers: ${status.implemented_scrapers.join(', ')}`
-        : 'Refresh'}
-    >
-      {running ? <Spinner /> : <Pulse />}
-      {label}
-    </button>
+    <div className="flex items-center gap-1.5">
+      {showHealth && (
+        <span
+          className="px-2 py-1 rounded-md bg-neon-rose/10 border border-neon-rose/40 text-neon-rose text-[10px] font-mono font-semibold cursor-help fx-heartbeat"
+          style={{ ['--pulse' as any]: 'rgba(251,113,133,0.3)' }}
+          title={[
+            failed.length ? `FAILED scrapers: ${failed.join(', ')}` : '',
+            suspect.length ? `Zero-yield (held, not wiped): ${suspect.join(', ')}` : '',
+          ].filter(Boolean).join('\n')}
+        >
+          ⚠ {failed.length + suspect.length}
+        </span>
+      )}
+      <button
+        onClick={() => trigger.mutate()}
+        disabled={running}
+        className="btn-neon relative overflow-hidden px-3 py-1.5 rounded-md bg-gradient-to-r from-neon-cyan/15 to-neon-violet/15 border border-ink-600 text-neon-cyan text-xs font-semibold uppercase tracking-wider hover:border-neon-cyan/50 disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+        title={status?.implemented_scrapers?.length
+          ? `Scrapers: ${status.implemented_scrapers.join(', ')}`
+          : 'Refresh'}
+      >
+        {running && typeof done === 'number' && typeof total === 'number' && total > 0 && (
+          <span className="absolute inset-x-0 bottom-0 h-[2px] bg-neon-cyan/70 transition-all duration-500"
+            style={{ width: `${(done / total) * 100}%` }} />
+        )}
+        {running ? <Spinner /> : <Pulse />}
+        {label}
+      </button>
+    </div>
   )
 }
 

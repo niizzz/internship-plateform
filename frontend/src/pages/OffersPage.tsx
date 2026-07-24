@@ -9,6 +9,7 @@ import Dashboard from '../components/Dashboard'
 import RecentOffers from '../components/RecentOffers'
 import CompanyLogo from '../components/CompanyLogo'
 import CompanyHover from '../components/CompanyHoverCard'
+import { useTilt } from '../lib/fx'
 
 const STATUSES: ApplicationStatus[] = ['not_applied', 'applied', 'online_assessment', 'interview', 'offer', 'rejected']
 
@@ -34,8 +35,14 @@ export default function OffersPage() {
   return (
     <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
       <div className="animate-risein">
-        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 font-mono">Live desk</div>
-        <h1 className="mt-1 text-2xl font-semibold text-slate-100">S&amp;T Internship Pipeline</h1>
+        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 font-mono flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-neon-cyan/70 fx-radar" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-neon-cyan" />
+          </span>
+          Live desk
+        </div>
+        <h1 className="mt-1 text-2xl font-semibold fx-textshine">S&amp;T Internship Pipeline</h1>
       </div>
 
       <div className="animate-risein" style={{ animationDelay: '60ms' }}><Dashboard /></div>
@@ -60,7 +67,11 @@ export default function OffersPage() {
           <EmptyState />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {offers.map(o => <OfferCard key={o.id} o={o} />)}
+            {offers.map((o, i) => (
+              <div key={o.id} className="animate-rowin" style={{ animationDelay: `${Math.min(i, 14) * 45}ms` }}>
+                <OfferCard o={o} />
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -104,6 +115,7 @@ function OfferCard({ o }: { o: Offer }) {
   const catCls = CATEGORY_COLOR[o.category] ?? CATEGORY_COLOR.markets
   const m = bankMeta(o.bank)
   const posted = postedInfo(o.posted_at, o.first_seen_at)
+  const tilt = useTilt(5)
   const facts = [
     { label: 'Start date', value: o.start_date_raw || 'see posting', highlight: true },
     { label: posted.label, value: posted.value },
@@ -112,10 +124,12 @@ function OfferCard({ o }: { o: Offer }) {
   ]
   return (
     <CompanyHover bank={o.bank} facts={facts} className="block">
+      <div ref={tilt.ref} onMouseMove={tilt.onMouseMove} onMouseLeave={tilt.onMouseLeave}
+        className="fx-tilt fx-glare relative rounded-xl">
       <Link to={`/offers/${o.id}`}
-        className="group relative block bg-ink-900/80 border border-ink-700 rounded-xl p-4 transition-all overflow-hidden hover:-translate-y-0.5"
+        className="fx-sheen group relative block bg-ink-900/80 border border-ink-700 rounded-xl p-4 transition-all overflow-hidden"
         style={{ boxShadow: 'none' }}
-        onMouseEnter={e => { e.currentTarget.style.boxShadow = `0 0 0 1px ${m.color}66, 0 12px 30px -12px ${m.color}` }}
+        onMouseEnter={e => { e.currentTarget.style.boxShadow = `0 0 0 1px ${m.color}66, 0 16px 40px -14px ${m.color}` }}
         onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none' }}>
         <div className="absolute top-0 right-0 h-px w-24 opacity-0 group-hover:opacity-100 transition-opacity"
           style={{ background: `linear-gradient(90deg, transparent, ${m.color})` }} />
@@ -147,9 +161,11 @@ function OfferCard({ o }: { o: Offer }) {
             <Pill on={o.has_tailored_cv} label="CV" />
             <Pill on={o.has_tailored_cover_letter} label="CL" />
           </div>
-          <span className="text-[10px] font-mono" style={{ color: m.color }}>{m.symbol} →</span>
+          <span className="text-[10px] font-mono transition-transform group-hover:translate-x-0.5"
+            style={{ color: m.color }}>{m.symbol} →</span>
         </div>
       </Link>
+      </div>
     </CompanyHover>
   )
 }
@@ -185,9 +201,14 @@ function SkeletonGrid() {
 
 function EmptyState() {
   return (
-    <div className="bg-ink-900/60 border border-dashed border-ink-700 rounded-xl p-10 text-center">
-      <div className="text-lg font-semibold text-slate-100 mb-1">No offers in the DB yet</div>
-      <div className="text-sm text-slate-400">Hit <span className="text-neon-cyan font-medium">Refresh</span> in the header to fire the scrapers.</div>
+    <div className="bg-ink-900/60 border border-dashed border-ink-700 rounded-xl p-10 text-center relative overflow-hidden">
+      <div className="mx-auto mb-4 relative h-10 w-10">
+        <span className="absolute inset-0 rounded-full bg-neon-cyan/50 fx-radar" />
+        <span className="absolute inset-0 rounded-full bg-neon-cyan/30 fx-radar" style={{ animationDelay: '0.7s' }} />
+        <span className="absolute inset-[14px] rounded-full bg-neon-cyan" />
+      </div>
+      <div className="text-lg font-semibold text-slate-100 mb-1">Scanning the street…</div>
+      <div className="text-sm text-slate-400">No offers in the DB yet — hit <span className="text-neon-cyan font-medium">Refresh</span> in the header to fire the scrapers.</div>
     </div>
   )
 }

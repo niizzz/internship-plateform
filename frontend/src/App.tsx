@@ -9,6 +9,7 @@ import NotificationBell from './components/NotificationBell'
 import RefreshButton from './components/RefreshButton'
 import TailorProgress from './components/TailorProgress'
 import ActivityTicker from './components/ActivityTicker'
+import { Particles, LiveClock } from './lib/fx'
 
 const NAV = [
   { to: '/', label: 'Offers' },
@@ -19,12 +20,13 @@ const NAV = [
 export default function App() {
   const loc = useLocation()
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col relative">
+      <Particles />
       <header className="sticky top-0 z-20 backdrop-blur-md bg-ink-950/80 border-b border-ink-700">
         <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-8">
             <Link to="/" className="flex items-center gap-2 group">
-              <LogoMark />
+              <span className="fx-floaty inline-flex"><LogoMark /></span>
               <span className="text-base font-semibold tracking-tight text-slate-100">
                 Nizz<span className="text-neon-cyan">Struggles</span>
               </span>
@@ -55,18 +57,31 @@ export default function App() {
         </div>
       </header>
       <ActivityTicker />
-      <main className="flex-1">
-        <Routes>
-          <Route path="/" element={<OffersPage />} />
-          <Route path="/offers/:id" element={<OfferDetailPage />} />
-          <Route path="/profile" element={<ProfilePage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
+      <main className="flex-1 relative z-10">
+        {/* keyed on the path so every navigation replays the entrance */}
+        <div key={loc.pathname} className="animate-pagein">
+          <Routes location={loc}>
+            <Route path="/" element={<OffersPage />} />
+            <Route path="/offers/:id" element={<OfferDetailPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </div>
       </main>
-      <footer className="border-t border-ink-700 py-3">
+      <footer className="border-t border-ink-700 py-3 relative z-10">
         <div className="max-w-7xl mx-auto px-6 text-[11px] text-slate-500 flex items-center justify-between font-mono">
           <span>nizzstruggles · local · {new Date().getFullYear()}</span>
-          <span className="text-slate-600">trading-floor mode</span>
+          <span className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-neon-green opacity-60" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-neon-green" />
+              </span>
+              <span className="text-slate-500">desk open</span>
+            </span>
+            <span className="text-slate-400"><LiveClock /></span>
+            <span className="text-slate-600">trading-floor mode</span>
+          </span>
         </div>
       </footer>
     </div>

@@ -2,6 +2,7 @@ import { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, DashboardData } from '../api'
 import { comma } from '../lib/format'
+import { useTilt } from '../lib/fx'
 import CountUp from './CountUp'
 import Columns from './Columns'
 import Sparkline from './Sparkline'
@@ -66,7 +67,8 @@ export default function Dashboard() {
 
         <Panel className="lg:col-span-2" title="Struggle-o-meter" tag="live pipeline">
           <div className="flex items-end justify-between">
-            <div>
+            <div className="relative">
+              <span className="absolute -left-3 -top-2 h-3 w-3 rounded-full bg-neon-cyan/60 fx-radar" />
               <div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Live offers</div>
               <div className="text-3xl font-semibold text-slate-100 tabular-nums leading-none mt-1">
                 <CountUp value={p?.active_offers ?? 0} />
@@ -89,8 +91,10 @@ export default function Dashboard() {
                 <div key={c.key} className="flex items-center gap-2">
                   <div className="w-[70px] text-[11px] text-slate-400 shrink-0">{c.label}</div>
                   <div className="flex-1 h-2 rounded-full bg-ink-800 overflow-hidden">
-                    <div className="h-full rounded-full transition-all duration-700"
-                      style={{ width: `${(n / total) * 100}%`, background: c.color, boxShadow: `0 0 8px -1px ${c.color}` }} />
+                    <div className="relative h-full rounded-full transition-all duration-700 overflow-hidden"
+                      style={{ width: `${(n / total) * 100}%`, background: c.color, boxShadow: `0 0 8px -1px ${c.color}` }}>
+                      {n > 0 && <div className="absolute inset-0 fx-barshimmer" />}
+                    </div>
                   </div>
                   <div className="w-6 text-right text-[11px] font-mono tabular-nums text-slate-300">{n}</div>
                 </div>
@@ -114,12 +118,14 @@ function StatCard({ label, value, accent, delta, sub }: {
   delta?: { dir: 'up' | 'down' | 'flat'; text: string; good: boolean }
   sub?: string
 }) {
+  const tilt = useTilt(6)
   return (
-    <div className="group relative bg-ink-900/80 border border-ink-700 rounded-xl p-4 overflow-hidden
+    <div ref={tilt.ref} onMouseMove={tilt.onMouseMove} onMouseLeave={tilt.onMouseLeave}
+      className="fx-tilt fx-glare fx-sheen group relative bg-ink-900/80 border border-ink-700 rounded-xl p-4 overflow-hidden
                     hover:border-ink-600 transition-all">
       <div className="absolute inset-x-0 top-0 h-[2px] opacity-70 group-hover:opacity-100 transition-opacity"
         style={{ background: `linear-gradient(90deg, transparent, ${accent}, transparent)` }} />
-      <div className="absolute -top-10 -right-8 w-28 h-28 rounded-full blur-2xl opacity-20 group-hover:opacity-30 transition-opacity"
+      <div className="absolute -top-10 -right-8 w-28 h-28 rounded-full blur-2xl opacity-20 group-hover:opacity-40 transition-opacity duration-500"
         style={{ background: accent }} />
       <div className="relative">
         <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 font-mono">{label}</div>
@@ -146,7 +152,7 @@ function Panel({ title, tag, right, className = '', children }: {
   title: string; tag?: string; right?: ReactNode; className?: string; children: ReactNode
 }) {
   return (
-    <div className={`bg-ink-900/70 border border-ink-700 rounded-xl p-4 ${className}`}>
+    <div className={`fx-sheen bg-ink-900/70 border border-ink-700 rounded-xl p-4 hover:border-ink-600 transition-colors ${className}`}>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-baseline gap-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-200">{title}</h3>

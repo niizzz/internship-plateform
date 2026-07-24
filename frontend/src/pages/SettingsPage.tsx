@@ -9,10 +9,15 @@ export default function SettingsPage() {
   const [clFile, setClFile] = useState<File | null>(null)
   const [extraFile, setExtraFile] = useState<File | null>(null)
   const [extraLabel, setExtraLabel] = useState('')
+  const [cvWarning, setCvWarning] = useState<string | null>(null)
 
   const uploadCV = useMutation({
     mutationFn: () => api.uploadCV(cvFile!),
-    onSuccess: () => { setCvFile(null); qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: (res: any) => {
+      setCvFile(null)
+      setCvWarning(res?.warning ?? null)
+      qc.invalidateQueries({ queryKey: ['settings'] })
+    },
   })
   const uploadCL = useMutation({
     mutationFn: () => api.uploadCoverLetter(clFile!),
@@ -54,6 +59,11 @@ export default function SettingsPage() {
           onUpload={() => uploadCV.mutate()}
           uploading={uploadCV.isPending}
         />
+        {cvWarning && (
+          <div className="mt-3 px-3 py-2 rounded-md bg-neon-amber/10 border border-neon-amber/40 text-neon-amber text-xs animate-risein">
+            ⚠ {cvWarning}
+          </div>
+        )}
         <Hint>PDF or DOCX. PDFs are auto-converted to DOCX so the tailoring engine can edit text.</Hint>
       </Card>
 

@@ -5,8 +5,16 @@ import { api, ApplicationStatus, STATUS_LABEL, TailorResult, DocSource, CATEGORY
 import { postedInfo } from '../lib/format'
 import StatusBadge from '../components/StatusBadge'
 import OfferDescription from '../components/OfferDescription'
+import { burstConfetti } from '../lib/fx'
 
 const STATUSES: ApplicationStatus[] = ['not_applied', 'applied', 'online_assessment', 'interview', 'offer', 'rejected']
+
+// The moments worth celebrating, in escalating palettes.
+const CELEBRATE: Partial<Record<ApplicationStatus, string[]>> = {
+  applied: ['#22d3ee', '#67e8f9', '#a855f7'],
+  interview: ['#a855f7', '#c084fc', '#22d3ee'],
+  offer: ['#34d399', '#fbbf24', '#22d3ee', '#a855f7', '#fb7185'],
+}
 
 export default function OfferDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -73,7 +81,7 @@ export default function OfferDetailPage() {
     <div className="max-w-5xl mx-auto px-6 py-6 space-y-4">
       <Link to="/" className="text-xs text-slate-400 hover:text-neon-cyan font-mono uppercase tracking-wider">← back to desk</Link>
 
-      <section className="relative bg-ink-900/80 border border-ink-700 rounded-xl p-5 overflow-hidden">
+      <section className="animate-risein relative bg-ink-900/80 border border-ink-700 rounded-xl p-5 overflow-hidden">
         <div className="absolute -top-12 -right-12 w-48 h-48 bg-neon-cyan/10 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-neon-violet/10 rounded-full blur-3xl pointer-events-none" />
         <div className="relative flex items-start justify-between gap-4">
@@ -124,13 +132,20 @@ export default function OfferDetailPage() {
         )}
       </section>
 
-      <section className="bg-ink-900/80 border border-ink-700 rounded-xl p-5">
+      <section className="animate-risein bg-ink-900/80 border border-ink-700 rounded-xl p-5" style={{ animationDelay: '70ms' }}>
         <h2 className="font-semibold text-slate-100 mb-3 text-sm uppercase tracking-wider">Application status</h2>
         <div className="flex flex-wrap gap-2">
           {STATUSES.map(s => (
             <button key={s}
-              onClick={() => updateStatus.mutate(s)}
-              className={`px-3 py-1 rounded text-xs font-medium border transition-all ${
+              onClick={(e) => {
+                updateStatus.mutate(s)
+                const colors = CELEBRATE[s]
+                if (colors && offer.application_status !== s) {
+                  const r = e.currentTarget.getBoundingClientRect()
+                  burstConfetti(r.left + r.width / 2, r.top + r.height / 2, colors)
+                }
+              }}
+              className={`px-3 py-1 rounded text-xs font-medium border transition-all active:scale-95 ${
                 offer.application_status === s
                   ? 'bg-neon-cyan text-ink-950 border-neon-cyan'
                   : 'border-ink-600 text-slate-300 hover:border-neon-cyan/40 hover:text-neon-cyan'
@@ -150,7 +165,7 @@ export default function OfferDetailPage() {
         </div>
       </section>
 
-      <section className="bg-ink-900/80 border border-ink-700 rounded-xl p-5">
+      <section className="animate-risein bg-ink-900/80 border border-ink-700 rounded-xl p-5" style={{ animationDelay: '140ms' }}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold text-slate-100 text-sm uppercase tracking-wider">CV &amp; cover letter</h2>
           <span className="text-[10px] font-mono text-slate-500">claude code cli · no api cost</span>
@@ -194,7 +209,7 @@ export default function OfferDetailPage() {
         )}
       </section>
 
-      <section className="bg-ink-900/80 border border-ink-700 rounded-xl p-5">
+      <section className="animate-risein bg-ink-900/80 border border-ink-700 rounded-xl p-5" style={{ animationDelay: '210ms' }}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold text-slate-100 text-sm uppercase tracking-wider">Assisted apply</h2>
           <span className="text-[10px] font-mono text-slate-500">auto-fills the bank's form · you review &amp; submit</span>

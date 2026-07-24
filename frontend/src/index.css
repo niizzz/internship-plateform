@@ -6,12 +6,39 @@ html, body, #root { height: 100%; }
 body {
   font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   background-color: #070a14;
-  background-image:
-    radial-gradient(circle at 50% -20%, rgba(34,211,238,0.10), transparent 60%),
-    radial-gradient(circle at 80% 20%, rgba(168,85,247,0.10), transparent 50%);
-  background-attachment: fixed;
   color: #e2e8f0;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ---- Living background: drifting aurora blobs + faint grid ---------------- */
+body::before {
+  content: '';
+  position: fixed; inset: -20%;
+  z-index: -2;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(34,211,238,0.14), transparent 45%),
+    radial-gradient(circle at 75% 65%, rgba(168,85,247,0.13), transparent 45%),
+    radial-gradient(circle at 55% 110%, rgba(52,211,153,0.08), transparent 50%);
+  animation: aurora 36s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(34,211,238,0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34,211,238,0.028) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse at 50% 0%, black 30%, transparent 75%);
+  pointer-events: none;
+}
+@keyframes aurora {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(4%, -3%) scale(1.06); }
+  66%  { transform: translate(-4%, 3%) scale(0.98); }
+  100% { transform: translate(2%, 4%) scale(1.05); }
 }
 
 ::selection { background: rgba(34,211,238,0.35); color: white; }
@@ -63,6 +90,103 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; }
 @keyframes risein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .animate-risein { animation: risein 460ms cubic-bezier(0.22,1,0.36,1) both; }
 
+/* ---- AAA-mode: tilt, glare, sheen, glow borders --------------------------- */
+
+/* 3D tilt cards: fx.useTilt drives --rx/--ry/--gx/--gy */
+.fx-tilt {
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateZ(0);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.fx-tilt:hover { transition: transform 60ms linear; }
+/* cursor-following glare */
+.fx-glare::after {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(360px circle at var(--gx, 50%) var(--gy, 50%),
+              rgba(148, 208, 255, 0.10), transparent 55%);
+  opacity: 0;
+  transition: opacity 220ms ease;
+  pointer-events: none;
+}
+.fx-glare:hover::after { opacity: 1; }
+
+/* Light sweep across a card on hover */
+.fx-sheen { position: relative; overflow: hidden; }
+.fx-sheen::before {
+  content: '';
+  position: absolute; top: -60%; bottom: -60%; left: -35%;
+  width: 34%;
+  background: linear-gradient(100deg, transparent, rgba(226,232,240,0.055), transparent);
+  transform: skewX(-18deg) translateX(-140%);
+  pointer-events: none;
+}
+.fx-sheen:hover::before { animation: sheen 850ms cubic-bezier(0.3, 0.6, 0.3, 1); }
+@keyframes sheen { to { transform: skewX(-18deg) translateX(720%); } }
+
+/* Rotating conic glow ring (hero numbers, radar pulses) */
+@keyframes spinring { to { transform: rotate(360deg); } }
+.fx-ring {
+  background: conic-gradient(from 0deg, transparent 0%, rgba(34,211,238,0.5) 12%, transparent 30%);
+  animation: spinring 3.4s linear infinite;
+}
+
+/* Radar pulse (live indicators, empty states) */
+@keyframes radar {
+  0%   { transform: scale(0.5); opacity: 0.65; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+.fx-radar { animation: radar 2.2s cubic-bezier(0.2, 0.6, 0.4, 1) infinite; }
+
+/* Shimmer running along pipeline bars */
+@keyframes barshimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+.fx-barshimmer {
+  background-image: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.35) 50%, transparent 70%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  mix-blend-mode: overlay;
+  animation: barshimmer 2.6s ease-in-out infinite;
+}
+
+/* Page transition: content slides up + fades on every route change */
+@keyframes pagein {
+  from { opacity: 0; transform: translateY(14px) scale(0.995); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+.animate-pagein { animation: pagein 420ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Header title shimmer (gradient slides through the text) */
+@keyframes textshine { to { background-position: 200% center; } }
+.fx-textshine {
+  background: linear-gradient(90deg, #e2e8f0 0%, #22d3ee 20%, #a855f7 40%, #e2e8f0 60%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: textshine 6s linear infinite;
+}
+
+/* Status badge heartbeat (applied/interview/offer feel ALIVE) */
+@keyframes heartbeat {
+  0%, 100% { box-shadow: 0 0 0 0 var(--pulse, rgba(34,211,238,0.35)); }
+  50%      { box-shadow: 0 0 10px 1px var(--pulse, rgba(34,211,238,0.35)); }
+}
+.fx-heartbeat { animation: heartbeat 2.2s ease-in-out infinite; }
+
+/* Floating idle motion for hero accents */
+@keyframes floaty { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+.fx-floaty { animation: floaty 5s ease-in-out infinite; }
+
+/* Button press springs */
+.btn-neon:active { transform: translateY(1px) scale(0.98); }
+
 @media (prefers-reduced-motion: reduce) {
-  .ticker-track, .animate-hovercard, .animate-rowin, .animate-risein { animation: none !important; }
+  .ticker-track, .animate-hovercard, .animate-rowin, .animate-risein,
+  .animate-pagein, .fx-ring, .fx-radar, .fx-barshimmer, .fx-textshine,
+  .fx-heartbeat, .fx-floaty { animation: none !important; }
+  .fx-textshine { color: #e2e8f0; background: none; }
+  .fx-tilt { transform: none !important; }
+  .fx-sheen::before { display: none; }
+  body::before { animation: none !important; }
 }
