@@ -121,6 +121,20 @@ class CACIBScraper(BankScraper):
                         return
                 except Exception:
                     return
+            # Bank's own date for the posting. CACIB's Talentsoft pages carry no
+            # JSON-LD — they render an "Update date dd/mm/yyyy" line, which is
+            # the only signal of how long the ad has been live (and far closer to
+            # the truth than when WE first scraped it). Try JSON-LD first anyway.
+            mp = re.search(r'"datePosted"\s*:\s*"([^"]+)"', r.text)
+            if not mp:
+                # Flatten tags first: the label and the date sit in separate
+                # elements, so a raw-HTML regex can't bridge them.
+                flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text))
+                mp = re.search(
+                    r"(?:update date|publication date|date de (?:mise \S+ jour|publication))"
+                    r"\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})", flat, re.I)
+            if mp:
+                o.posted_raw = mp.group(1)
             # The job content lives in the `detail_offre` container (title,
             # contract, description, candidate criteria). Never fall back to the
             # whole page — it's full of nav/login/search-facet noise.

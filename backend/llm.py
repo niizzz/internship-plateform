@@ -21,6 +21,12 @@ DEFAULT_MODEL = "claude-cli"
 
 CALL_TIMEOUT_S = 300  # generous: CLI cold-start + long CV + long posting
 
+# Max characters for a tailored experience bullet to stay on ONE printed line at
+# the CV's base font size (measured against the A4 render; ~135 is the hard wrap
+# point, 132 leaves a small safety margin). Longer rewrites are rejected in
+# favour of the original bullet; see tailor_cv_json.
+BULLET_MAX = 132
+
 CV_SYSTEM = """You are an expert career coach helping a finance student tailor their CV to pass ATS filters for Sales, Trading, and Structuring internships at top investment banks.
 
 You will receive:
@@ -60,17 +66,17 @@ VOICE & STYLE:
 
 BANNED phrases (never use): "I am writing to apply", "I am confident that", "team player", "hit the ground running", "passionate about finance", "detail-oriented", "fast-paced environment", "I believe my skills", "perfect fit", "hard-working", "dynamic". Do not restate the CV line by line. Do not open with the candidate's name or a date.
 
-STRUCTURE (about 4 short paragraphs, one page, ~320–400 words):
+STRUCTURE (exactly 4 short paragraphs, one page, ~300–380 words):
 1. Hook + why this exact role and bank.
-2. The signature story: problem → the candidate's action → skill → result, tied to what the posting needs.
-3. One more angle of fit — a second short proof point or a genuine, specific motivation.
+2. The signature story: problem, the candidate's action, the skill, and the result, tied to what the posting needs.
+3. One more angle of fit: a second short proof point or a genuine, specific motivation.
 4. A brief, warm close that looks forward and asks for a conversation.
 
 HARD RULES:
 - Use ONLY facts from the candidate's CV — never invent experience, tools, numbers, or results. Keep real numbers exact; they carry the story.
-- Use the candidate's real name for the sign-off; no placeholders like [Your Name].
-- English. Plain text only — no markdown, no headings, no preamble like "Here is the cover letter".
-- End with "Sincerely," on its own line, then the candidate's full name on the next line.
+- Write ONLY the body paragraphs. Do NOT write a salutation/greeting ("Dear ..."), a date, an address block, or a sign-off ("Sincerely", a name) — those are added automatically around your text. Do not open with the candidate's name.
+- No em dashes or en dashes. No markdown, no headings, no bullet points, no preamble like "Here is the cover letter".
+- English, plain text, paragraphs separated by a blank line.
 """
 
 
@@ -188,7 +194,8 @@ Rewrite:
 
 HARD RULES:
 - NEVER change employers, schools, job titles, dates, locations, numbers, GPAs, or metrics. Only rephrase.
-- Keep each bullet the same length or shorter (the CV must stay one page) and keep the SAME NUMBER of bullets per entry.
+- Every bullet MUST fit on ONE line. Keep each bullet to about 120 characters and NEVER longer than the original bullet — if the original is long, make your version SHORTER. Compress by cutting filler words ("responsible for", "in order to", "various"), not facts or numbers.
+- Keep the SAME NUMBER of bullets per entry.
 - Do not invent experience, tools, or results.
 - Keep English and a professional tone.
 
@@ -276,10 +283,91 @@ def tailor_cv_json(base_cv: dict, offer: dict) -> tuple[dict, int]:
             if isinstance(nb, list) and old:
                 clean = [str(x).strip() for x in nb if str(x).strip()]
                 if len(clean) == len(old):
-                    if clean != old:
+                    # One-line guard: accept a rewritten bullet only if it fits on
+                    # one line (<= BULLET_MAX chars). If the model returned a longer
+                    # bullet, keep the ORIGINAL — the renderer's font auto-fit then
+                    # shrinks any base bullet that is itself over-length. This keeps
+                    # tailored CVs at near-full size instead of shrinking to fit a
+                    # rewrite that grew past one line.
+                    capped = [new_b if len(new_b) <= BULLET_MAX else old_b
+                              for new_b, old_b in zip(clean, old)]
+                    if capped != old:
                         changes += 1
-                    entry["bullets"] = clean
+                    entry["bullets"] = capped
     return tailored, changes
+
+
+_GREETING_RE = re.compile(r"^\s*(dear|hello|hi|to whom|good (morning|afternoon))\b.*", re.I)
+_SIGNOFF_RE = re.compile(
+    r"\n\s*(sincerely|regards|best regards|kind regards|warm regards|"
+    r"yours (faithfully|sincerely|truly)|respectfully|best),?\s*\n.*",
+    re.I | re.S)
+
+
+def _strip_scaffold(text: str) -> str:
+    """Drop any greeting line / sign-off block the model added despite being told
+    to write body-only (the renderer owns the salutation and sign-off)."""
+    t = (text or "").strip()
+    lines = t.split("\n")
+    if lines and _GREETING_RE.match(lines[0].strip()):
+        t = "\n".join(lines[1:]).strip()
+    t = _SIGNOFF_RE.sub("", t).strip()
+    return t
+
+
+_HUMANIZER_MD_PATH = Path(__file__).parent / "humanizer_skill.md"
+_humanizer_md_cache: str | None = None
+
+
+def _humanizer_instructions() -> str:
+    global _humanizer_md_cache
+    if _humanizer_md_cache is None:
+        try:
+            _humanizer_md_cache = _HUMANIZER_MD_PATH.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning("humanizer skill not found (%s); skipping humanize pass", e)
+            _humanizer_md_cache = ""
+    return _humanizer_md_cache
+
+
+def humanize_cover_letter(body_text: str) -> str:
+    """Second CLI pass: rewrite the cover-letter body with the vendored humanizer
+    skill to strip AI tells and give it a natural, human voice. Facts are frozen.
+    Falls back to the input on any failure so the pipeline never breaks."""
+    guide = _humanizer_instructions()
+    if not guide.strip() or not body_text.strip():
+        return body_text
+    prompt = (
+        f"{guide}\n\n"
+        "======================================================================\n"
+        "TASK: Apply the humanizing guide above to the COVER-LETTER BODY below.\n\n"
+        "This is a real job-application cover letter, so obey these hard limits:\n"
+        "- Do NOT invent, add, drop, or alter any fact, number, employer, school, "
+        "date, tool, or result. Change only HOW it reads, never WHAT it says.\n"
+        "- Keep first person; keep it warm and specific; keep the same number of "
+        "paragraphs and the same order of ideas.\n"
+        "- Keep standard finance compound terms hyphenated when they modify a noun "
+        "(equity-linked, fixed-income, cross-asset, soft-call, step-up, "
+        "market-making, front-office, risk-adjusted, sales-trading). Do NOT strip "
+        "those hyphens.\n"
+        "- No em dashes or en dashes, no emojis, no markdown, no headings.\n"
+        "- Do NOT add a greeting, date, address, or sign-off. Output the body only.\n"
+        "- Output ONLY the final rewritten body between <LETTER> and </LETTER> "
+        "tags. No draft, no audit notes, no commentary.\n\n"
+        f"<BODY>\n{body_text.strip()}\n</BODY>"
+    )
+    try:
+        out = _run_claude(prompt)
+    except ClaudeCliError as e:
+        logger.warning("humanizer pass failed (%s); using original draft", e)
+        return body_text
+    m = re.search(r"<LETTER>(.*?)</LETTER>", out, re.DOTALL)
+    result = (m.group(1) if m else out)
+    result = re.sub(r"</?LETTER>", "", result).strip()
+    # Backstop: the guide bans em/en dashes, but if any survived, soften them.
+    result = re.sub(r"\s*[—–]\s*", ", ", result)
+    result = re.sub(r",\s*,", ", ", result)
+    return _strip_scaffold(result) or body_text
 
 
 def generate_cover_letter(
@@ -288,6 +376,9 @@ def generate_cover_letter(
     base_cover_letter_text: str | None = None,
     **_ignored,
 ) -> str:
+    """Generate the cover-letter BODY (no salutation/sign-off) as a story draft,
+    then run the humanizer pass over it. Returns body-only text; the renderer
+    wraps it with the letterhead, date, recipient, greeting and sign-off."""
     template_block = (
         f"\n\nCANDIDATE'S OWN COVER LETTER TEMPLATE (match its voice and reuse its strongest lines where relevant):\n"
         f"{base_cover_letter_text}"
@@ -297,6 +388,7 @@ def generate_cover_letter(
         f"{COVER_LETTER_SYSTEM}\n\n"
         f"CANDIDATE CV:\n{base_cv_text}"
         f"{template_block}\n\n"
-        f"Write the cover letter for this job:\n\n{_job_block(offer)}"
+        f"Write the cover letter body for this job:\n\n{_job_block(offer)}"
     )
-    return _run_claude(prompt)
+    draft = _strip_scaffold(_run_claude(prompt))
+    return humanize_cover_letter(draft)

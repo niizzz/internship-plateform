@@ -2,7 +2,13 @@ import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, Offer, STATUS_LABEL, ApplicationStatus, CATEGORY_COLOR } from '../api'
+import { bankMeta } from '../lib/bankMeta'
+import { postedInfo } from '../lib/format'
 import StatusBadge from '../components/StatusBadge'
+import Dashboard from '../components/Dashboard'
+import RecentOffers from '../components/RecentOffers'
+import CompanyLogo from '../components/CompanyLogo'
+import CompanyHover from '../components/CompanyHoverCard'
 
 const STATUSES: ApplicationStatus[] = ['not_applied', 'applied', 'online_assessment', 'interview', 'offer', 'rejected']
 
@@ -26,48 +32,37 @@ export default function OffersPage() {
   )
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-6">
-      <HeroStats stats={stats} offerCount={offers.length} />
+    <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <div className="animate-risein">
+        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 font-mono">Live desk</div>
+        <h1 className="mt-1 text-2xl font-semibold text-slate-100">S&amp;T Internship Pipeline</h1>
+      </div>
 
-      <FilterBar
-        search={search} setSearch={setSearch}
-        bank={bank} setBank={setBank} banks={banks}
-        category={category} setCategory={setCategory}
-        country={country} setCountry={setCountry} countries={countries}
-        status={status} setStatus={setStatus}
-      />
+      <div className="animate-risein" style={{ animationDelay: '60ms' }}><Dashboard /></div>
+      <div className="animate-risein" style={{ animationDelay: '120ms' }}><RecentOffers /></div>
 
-      {isLoading ? (
-        <SkeletonGrid />
-      ) : offers.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {offers.map(o => <OfferCard key={o.id} o={o} />)}
+      <div className="pt-1">
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-200">All offers</h2>
+          <span className="text-[10px] font-mono text-slate-500">{offers.length} shown</span>
         </div>
-      )}
-    </div>
-  )
-}
+        <FilterBar
+          search={search} setSearch={setSearch}
+          bank={bank} setBank={setBank} banks={banks}
+          category={category} setCategory={setCategory}
+          country={country} setCountry={setCountry} countries={countries}
+          status={status} setStatus={setStatus}
+        />
 
-function HeroStats({ stats, offerCount }: { stats: any; offerCount: number }) {
-  return (
-    <div className="mb-5 flex items-end justify-between flex-wrap gap-3">
-      <div>
-        <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 font-mono">Live Desk</div>
-        <h1 className="mt-1 text-2xl font-semibold text-slate-100">
-          S&amp;T Internship Pipeline
-        </h1>
-        <div className="mt-1 text-sm text-slate-400">
-          <span className="text-neon-cyan font-mono font-semibold tabular-nums">{stats?.total_active_offers ?? offerCount}</span>
-          <span className="ml-1">active offers</span>
-          {Object.entries(stats?.by_status ?? {}).filter(([_, c]) => (c as number) > 0).map(([s, c]) => (
-            <span key={s} className="ml-3 inline-flex items-center gap-1">
-              <StatusBadge status={s as ApplicationStatus} />
-              <span className="font-mono tabular-nums text-slate-300">{c as number}</span>
-            </span>
-          ))}
-        </div>
+        {isLoading ? (
+          <SkeletonGrid />
+        ) : offers.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {offers.map(o => <OfferCard key={o.id} o={o} />)}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -107,38 +102,55 @@ function FilterBar(props: any) {
 
 function OfferCard({ o }: { o: Offer }) {
   const catCls = CATEGORY_COLOR[o.category] ?? CATEGORY_COLOR.markets
+  const m = bankMeta(o.bank)
+  const posted = postedInfo(o.posted_at, o.first_seen_at)
+  const facts = [
+    { label: 'Start date', value: o.start_date_raw || 'see posting', highlight: true },
+    { label: posted.label, value: posted.value },
+    { label: 'Location', value: o.city || o.country || '—' },
+    { label: 'Category', value: o.category },
+  ]
   return (
-    <Link to={`/offers/${o.id}`}
-      className="group relative block bg-ink-900/80 border border-ink-700 rounded-xl p-4 hover:border-neon-cyan/40 hover:shadow-neon-cyan transition-all overflow-hidden">
-      <div className="absolute top-0 right-0 h-px w-24 bg-gradient-to-r from-transparent to-neon-cyan/40 opacity-0 group-hover:opacity-100 transition-opacity" />
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500">{o.bank}</span>
-            <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${catCls}`}>{o.category}</span>
+    <CompanyHover bank={o.bank} facts={facts} className="block">
+      <Link to={`/offers/${o.id}`}
+        className="group relative block bg-ink-900/80 border border-ink-700 rounded-xl p-4 transition-all overflow-hidden hover:-translate-y-0.5"
+        style={{ boxShadow: 'none' }}
+        onMouseEnter={e => { e.currentTarget.style.boxShadow = `0 0 0 1px ${m.color}66, 0 12px 30px -12px ${m.color}` }}
+        onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none' }}>
+        <div className="absolute top-0 right-0 h-px w-24 opacity-0 group-hover:opacity-100 transition-opacity"
+          style={{ background: `linear-gradient(90deg, transparent, ${m.color})` }} />
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <CompanyLogo bank={o.bank} size={40} />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500 truncate">{o.bank}</span>
+                <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${catCls}`}>{o.category}</span>
+              </div>
+              <h3 className="mt-1 text-sm font-semibold text-slate-100 group-hover:text-neon-cyan transition-colors line-clamp-2">
+                {o.role_title}
+              </h3>
+            </div>
           </div>
-          <h3 className="mt-1 text-sm font-semibold text-slate-100 group-hover:text-neon-cyan transition-colors line-clamp-2">
-            {o.role_title}
-          </h3>
+          <StatusBadge status={o.application_status} />
         </div>
-        <StatusBadge status={o.application_status} />
-      </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-slate-400">
-        <Meta label="Location" value={o.city || o.country || '—'} />
-        <Meta label="Program" value={o.program_type.replace(/_/g, ' ')} />
-        <Meta label="Start" value={o.start_date_raw || '—'} />
-        <Meta label="Duration" value={o.duration || '—'} />
-      </div>
-
-      <div className="mt-3 pt-3 border-t border-ink-700 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-[11px] text-slate-500">
-          <Pill on={o.has_tailored_cv} label="CV" />
-          <Pill on={o.has_tailored_cover_letter} label="CL" />
+        <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-slate-400">
+          <Meta label="Location" value={o.city || o.country || '—'} />
+          <Meta label="Program" value={o.program_type.replace(/_/g, ' ')} />
+          <Meta label="Start" value={o.start_date_raw || '—'} />
+          <Meta label={posted.label} value={posted.value} />
         </div>
-        <span className="text-[10px] text-slate-500 font-mono">view →</span>
-      </div>
-    </Link>
+
+        <div className="mt-3 pt-3 border-t border-ink-700 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-[11px] text-slate-500">
+            <Pill on={o.has_tailored_cv} label="CV" />
+            <Pill on={o.has_tailored_cover_letter} label="CL" />
+          </div>
+          <span className="text-[10px] font-mono" style={{ color: m.color }}>{m.symbol} →</span>
+        </div>
+      </Link>
+    </CompanyHover>
   )
 }
 

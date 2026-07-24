@@ -41,3 +41,28 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; }
 }
 .btn-neon:hover { box-shadow: 0 0 0 1px rgba(34,211,238,0.5), 0 0 18px -4px rgba(34,211,238,0.45); }
 .btn-neon:active { transform: translateY(1px); }
+
+/* ---- Live desk motion ---------------------------------------------------- */
+
+/* Scrolling activity ticker (content is duplicated, so -50% loops seamlessly) */
+.ticker-track { animation: ticker 46s linear infinite; }
+@keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.ticker-fade-l, .ticker-fade-r { position: absolute; top: 0; bottom: 0; width: 60px; z-index: 2; pointer-events: none; }
+.ticker-fade-l { left: 0;  background: linear-gradient(90deg,  #070a14, transparent); }
+.ticker-fade-r { right: 0; background: linear-gradient(270deg, #070a14, transparent); }
+
+/* Company hover card — opacity only, so the anchor's positioning transform is kept */
+@keyframes hovercard { from { opacity: 0; } to { opacity: 1; } }
+.animate-hovercard { animation: hovercard 130ms ease-out; }
+
+/* Blotter rows "print" in */
+@keyframes rowin { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.animate-rowin { animation: rowin 400ms cubic-bezier(0.22,1,0.36,1) both; }
+
+/* Soft up-fade for panels/cards on first paint */
+@keyframes risein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.animate-risein { animation: risein 460ms cubic-bezier(0.22,1,0.36,1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track, .animate-hovercard, .animate-rowin, .animate-risein { animation: none !important; }
+}

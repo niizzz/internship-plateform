@@ -32,14 +32,17 @@ QUERY = """query GetRoles($searchQueryInput: RoleSearchQueryInput!) {
       locations { primary state country city }
       status
       division
+      startDate
       externalSource { sourceId }
     }
   }
 }"""
 
-# Goldman currently exposes only ~2 EARLY_CAREER roles; most S&T interns sit
-# in PROFESSIONAL with "Summer Analyst" / "Intern" in the title. We search by
-# keyword across both buckets.
+# Goldman's student/intern roles live in the CAMPUS experience bucket (~150,
+# incl. the "FICC & Equities (Sales & Trading) | Seasonal/Off Cycle Internship"
+# postings) — NOT EARLY_CAREER (~6) and NOT PROFESSIONAL. We sweep EARLY_CAREER
+# and CAMPUS in full (small buckets) and keyword-narrow the large PROFESSIONAL
+# bucket (some S&T summer analysts also sit there).
 KEYWORDS = [
     "", "summer analyst", "intern", "internship", "off-cycle",
     "industrial placement", "spring", "graduate",
@@ -66,7 +69,7 @@ class GoldmanScraper(BankScraper):
             # One full EARLY_CAREER sweep (bucket is small), plus one keyworded
             # PROFESSIONAL sweep per keyword (S&T summer analysts live there).
             # Sweeps run concurrently (bounded) instead of serially.
-            sweeps: list[tuple[str, list[str]]] = [("", ["EARLY_CAREER"])]
+            sweeps: list[tuple[str, list[str]]] = [("", ["EARLY_CAREER"]), ("", ["CAMPUS"])]
             sweeps += [(kw, ["PROFESSIONAL"]) for kw in KEYWORDS if kw]
             sem = asyncio.Semaphore(3)
 
@@ -163,6 +166,8 @@ class GoldmanScraper(BankScraper):
             location=loc_str,
             apply_url=ROLE_URL_TMPL.format(role_id=ext_id),
             source_url=self.careers_url,
+            # GS `startDate` = when the posting went live on higher.gs.com.
+            posted_raw=it.get("startDate"),
             extras={
                 "division": it.get("division"),
                 "job_function": it.get("jobFunction"),

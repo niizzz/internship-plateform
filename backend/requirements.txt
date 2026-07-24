@@ -6,6 +6,7 @@ playwright
 anthropic
 python-docx
 pypdf
+pymupdf
 pdf2docx
 httpx
 pydantic-settings

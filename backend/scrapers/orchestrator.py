@@ -14,14 +14,18 @@ from db import (
 from .base import (
     BankScraper, ScrapedOffer, is_snt_role, is_internship_or_grad,
     parse_location, in_europe, extract_start_date, extract_duration,
-    normalize_start_date,
+    normalize_start_date, parse_posted_date,
 )
 
 logger = logging.getLogger(__name__)
 
-# Hard cap per scraper so one hung bank (Playwright stuck on a bot wall etc.)
-# can't stall the whole refresh.
-SCRAPER_TIMEOUT_S = 600
+# Hard cap per scraper so one slow/hung bank (Playwright stuck on a bot wall,
+# deep pagination, etc.) can't stall the whole refresh. Scrapers run
+# concurrently and each bank's results are persisted the moment it finishes
+# (see refresh_all), so a slow bank only delays ITS OWN offers, never the other
+# banks'. A scraper cut off here is a failure (its existing offers are kept, not
+# wiped). Most banks finish in <30s; Barclays/SocGen sit behind bot walls.
+SCRAPER_TIMEOUT_S = 120
 
 
 def _coerce_category(raw: Optional[str], fallback: str) -> Category:
@@ -162,6 +166,7 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
                 # overwrite so previously stored junk self-corrects.
                 existing.start_date_raw = s.start_date_raw
                 existing.start_date_parsed = s.start_date_parsed
+                existing.posted_at = parse_posted_date(s.posted_raw) or existing.posted_at
                 existing.duration = s.duration or existing.duration
                 existing.program_type = _coerce_program(s.program_type, s.role_title)
                 existing.category = _coerce_category(s.category, "markets")
@@ -182,6 +187,7 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
                     city=s.city,
                     start_date_raw=s.start_date_raw,
                     start_date_parsed=s.start_date_parsed,
+                    posted_at=parse_posted_date(s.posted_raw),
                     duration=s.duration,
                     program_type=_coerce_program(s.program_type, s.role_title),
                     description=s.description,
@@ -233,6 +239,56 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
     }
 
 
-async def refresh_all(scrapers: list[BankScraper]) -> dict:
-    raw, scraped_ok = await run_all_scrapers(scrapers)
-    return persist(raw, scraped_ok)
+async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
+    """Scrape all banks concurrently, persisting EACH bank's results the moment
+    that bank finishes rather than waiting for the slowest one.
+
+    New offers therefore land in the DB (and show up in the UI) within seconds of
+    each scraper completing; a bank that is slow or times out — Barclays/SocGen
+    behind bot walls — no longer holds back the other two dozen banks, which was
+    why a refresh appeared to "take forever" after new banks were added.
+
+    `progress`, if given, is called with a snapshot dict after every bank so the
+    UI can show "X/Y banks done" and refresh the list live.
+    """
+    total = len(scrapers)
+    agg = {
+        "inserted": 0, "updated": 0, "removed": 0,
+        "total_kept_after_filter": 0, "scraped_banks": [], "failed": [],
+        "done": 0, "total": total,
+    }
+
+    def report():
+        if progress:
+            try:
+                progress(dict(agg))
+            except Exception:
+                logger.debug("refresh progress callback error", exc_info=True)
+
+    report()
+    tasks = [asyncio.ensure_future(_run_one(s)) for s in scrapers]
+    for fut in asyncio.as_completed(tasks):
+        bank, ok, offers = await fut
+        if ok:
+            try:
+                # persist() is synchronous (DB writes); run it off the event loop.
+                # as_completed awaits one at a time, so no two persists race on
+                # SQLite. Each call only touches THIS bank's rows (scraped_banks
+                # = {bank}), so per-bank stale-offer cleanup still works.
+                res = await asyncio.to_thread(persist, offers, {bank})
+                agg["inserted"] += res["inserted"]
+                agg["updated"] += res["updated"]
+                agg["removed"] += res["removed"]
+                agg["total_kept_after_filter"] += res["total_kept_after_filter"]
+                agg["scraped_banks"].append(bank)
+            except Exception as e:
+                logger.exception("persist failed for %s: %s", bank, e)
+                agg["failed"].append(bank)
+        else:
+            agg["failed"].append(bank)
+        agg["done"] += 1
+        report()
+
+    agg["scraped_banks"].sort()
+    agg["failed"].sort()
+    return agg

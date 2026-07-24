@@ -193,13 +193,16 @@ def build_field_values(profile: dict) -> list[list]:
         profile.get("work_authorization"))
     # --- Address / identity --------------------------------------------------
     add(r"post[\s_-]*(?:al)?[\s_-]*code|zip|plz|code postal", profile.get("postcode"))
+    # City BEFORE the street-address rule: Workday names every address subfield
+    # "addressSection_*" (…_city, …_addressLine1), and the bare "address" branch
+    # below would otherwise claim the City field and drop the street into it.
+    # Lookbehinds keep "ethnicity"/"electricity" from matching as a city field.
+    add(r"(?<!ethni)(?<!electri)city|town|ville|stadt|locality|commune",
+        profile.get("city"))
     # (?!-level): Oracle city/state inputs carry autocomplete="address-level2/3"
     # — without the guard the street address lands in the City field.
     add(r"address[\s_-]*line|street|address(?!-level)(?!.*email)|adresse",
         profile.get("address"))
-    # Lookbehinds keep "ethnicity"/"electricity" from matching as a city field.
-    add(r"(?<!ethni)(?<!electri)city|town|ville|stadt|locality|commune",
-        profile.get("city"))
     add(r"nationalit|citizenship|citoyennet", profile.get("nationality"), nat_alts)
     add(r"universit|school|college|institution|[ée]cole|hochschule",
         profile.get("university"))
@@ -813,10 +816,12 @@ el => {
                el.getAttribute('autocomplete')||'', label].join(' ').toLowerCase().replace(/\s+/g,' ');
   // intl-tel-input (and clones) manage a country flag internally.
   const iti = !!el.closest('.iti, .intl-tel-input, [class*="intl-tel"], [class*="PhoneInput"]');
-  // a separate dial-code selector sibling means this field wants the national part
+  // a separate dial-code selector sibling means this field wants the national part.
+  // Covers inputs/selects AND Workday's country-phone-code button dropdown.
   let dial = null, n = el.parentElement;
   const dsel = "input[id*='country-code'],input[id*='countryCode'],select[name*='countryCode'],"+
-               "input[name*='dialCode'],[data-automation-id*='countryPhoneCode'] input,select[name*='phoneCode']";
+               "input[name*='dialCode'],[data-automation-id*='countryPhoneCode'] input,select[name*='phoneCode'],"+
+               "button[data-automation-id*='hone-code' i],button[data-automation-id*='honecode' i]";
   for (let i=0;i<6&&n&&!dial;i++,n=n.parentElement) dial = n.querySelector(dsel);
   const dialVal = dial ? String(dial.value||'').replace(/\s/g,'') : '';
   // intl-tel-input pre-fills the field with just the dial code ("+33 "); treat
@@ -826,7 +831,7 @@ el => {
   return {ctx: ctx.slice(0,250), nameId: ((el.name||'')+' '+(el.id||'')).toLowerCase(),
           visible: r.width>1 && r.height>1 && !el.disabled && !el.readOnly,
           empty: emptyish, filledFlag: el.dataset.idbFilled==='1',
-          iti, dialVal, sig: !!el.closest("[class*='esign'],[class*='signatur']")};
+          iti, dialVal, hasDial: !!dial, sig: !!el.closest("[class*='esign'],[class*='signatur']")};
 }
 """
 
@@ -887,10 +892,12 @@ async def _fill_phone_fields(frame: Frame, state: dict) -> int:
             done.add(key)  # give up after several tries; leave for the user
             continue
         attempts[key] = attempts.get(key, 0) + 1
-        # national part when a dial-code selector sits alongside; else full intl
-        value = intl
-        if info["dialVal"] and not info["iti"]:
+        # national part when a dial-code selector sits alongside (input/select or
+        # a Workday country-phone-code button); else the full international number
+        if (info["dialVal"] or info.get("hasDial")) and not info["iti"]:
             value = _national_number(intl, info["dialVal"])
+        else:
+            value = intl
         try:
             await el.scroll_into_view_if_needed(timeout=2000)
             await el.click(timeout=2000)
@@ -961,6 +968,131 @@ async def _fill_cx_comboboxes(frame: Frame, py_rules: list, state: dict,
         except Exception:
             continue
     return filled
+
+
+# --- Workday button/listbox dropdowns ---------------------------------------
+# Workday (Citi, MS, Santander, BBVA, Euronext, RBC, CMC…) renders most single
+# selects as a <button aria-haspopup="listbox"> that opens a portal listbox of
+# <div data-automation-id="promptOption">. These aren't <select>/radio/pill, so
+# the generic JS never touches them — this handler drives them like the Oracle
+# combobox pass: match the button's context, open, pick the option, click it.
+_WD_DROPDOWN_SEL = (
+    "button[aria-haspopup='listbox'],"
+    "button[data-automation-id$='Dropdown'],"
+    "button[data-automation-id='countryDropdown'],"
+    "button[data-automation-id*='ountryPhoneCode']"
+)
+_WD_OPTION_SEL = (
+    "[data-automation-id='promptOption'],"
+    "div[data-automation-id='activeListContainer'] [role='option'],"
+    "ul[role='listbox'] [role='option']"
+)
+_WD_PLACEHOLDERS = {
+    "", "select one", "select", "select...", "select an option", "select a value",
+    "choose", "choose one", "search", "make a selection", "-",
+}
+_WD_INFO_JS = r"""el => {
+    let label = '';
+    let node = el.parentElement;
+    for (let i = 0; i < 5 && node; i++, node = node.parentElement) {
+        if (node.querySelectorAll("button[aria-haspopup],input:not([type=hidden]),select").length > 1) break;
+        const l = node.querySelector("label,legend,[id$='label'],[class*='label']");
+        if (l && (l.textContent||'').trim()) { label = l.textContent; break; }
+    }
+    const r = el.getBoundingClientRect();
+    return {aid: el.getAttribute('data-automation-id')||'', al: el.getAttribute('aria-label')||'',
+            id: el.id||'', label, text: (el.textContent||'').trim(),
+            visible: r.width > 1 && r.height > 1 && !el.disabled,
+            sig: !!el.closest("[class*='esign'],[class*='signatur']")};
+}"""
+
+
+async def _fill_workday_dropdowns(frame: Frame, py_rules: list, state: dict,
+                                  limit: int = 2) -> int:
+    """Fill Workday button/listbox dropdowns (country, gender, phone code,
+    source, yes/no…) that match a rule. At most `limit` per pass."""
+    done: set = state.setdefault("wd_done", set())
+    filled = 0
+    try:
+        btns = await frame.query_selector_all(_WD_DROPDOWN_SEL)
+    except Exception:
+        return 0
+    for btn in btns:
+        if filled >= limit:
+            break
+        try:
+            info = await btn.evaluate(_WD_INFO_JS)
+            key = info["aid"] or info["id"] or info["al"]
+            if not key or key in done or not info["visible"] or info["sig"]:
+                continue
+            text_l = info["text"].lower().strip()
+            if text_l and text_l not in _WD_PLACEHOLDERS:
+                done.add(key)          # already has a value — leave it
+                continue
+            ctx = _norm(f"{info['aid']} {info['al']} {info['id']} {info['label']}")
+            if re.search(r"honey|signatur", ctx):
+                done.add(key)
+                continue
+            cands = None
+            for rx_c, val, alts, kind in py_rules:
+                if kind == "date" or not rx_c.search(ctx):
+                    continue
+                cands = [c for c in ([val] + (alts or [])) if c]
+                break
+            done.add(key)              # one attempt per field per assist
+            if not cands:
+                continue
+            if await _wd_pick(frame, btn, cands):
+                filled += 1
+        except Exception:
+            continue
+    return filled
+
+
+async def _wd_pick(frame: Frame, btn: ElementHandle, cands: list[str]) -> bool:
+    """Open a Workday dropdown and click the option best matching `cands`.
+    Long lists (country) expose a search box — type the value to filter first.
+    Always closes the popup on failure so it can't block later fields."""
+    try:
+        await btn.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        await btn.click()
+        await frame.wait_for_timeout(_w(300))
+        # Filter box for long lists (country ~200 options are virtualized).
+        try:
+            search = await frame.query_selector(
+                "input[data-automation-id='searchBox'],"
+                "div[data-automation-id='activeListContainer'] input[type='text']")
+            if search:
+                await search.fill(cands[0][:40])
+                await frame.wait_for_timeout(_w(500))
+        except Exception:
+            pass
+        opts = await frame.query_selector_all(_WD_OPTION_SEL)
+        pairs = []
+        for o in opts:
+            try:
+                t = (await o.inner_text()).strip()
+                if t:
+                    pairs.append((o, t))
+            except Exception:
+                continue
+        best = _pick_text([t for _, t in pairs], cands)
+        if best is not None:
+            for o, t in pairs:
+                if t == best:
+                    await o.click()
+                    await frame.wait_for_timeout(_w(300))
+                    return True
+    except Exception as e:
+        logger.debug("wd_pick failed: %s", e)
+    try:
+        await frame.keyboard.press("Escape")
+    except Exception:
+        pass
+    return False
 
 
 async def _set_native(el: ElementHandle, value: str) -> None:
@@ -1346,6 +1478,13 @@ async def fill_pass(
         except Exception as e:
             logger.debug("oracle pass error: %s", e)
 
+        # Workday button/listbox dropdowns (country, gender, source, phone code…).
+        try:
+            if await frame.query_selector(_WD_DROPDOWN_SEL):
+                filled_total += await _fill_workday_dropdowns(frame, state["py_rules"], state)
+        except Exception as e:
+            logger.debug("workday pass error: %s", e)
+
         # File uploads: CV into resume-ish inputs, CL into cover-letter-ish,
         # extra documents into "other/additional document" ones.
         try:
@@ -1434,9 +1573,17 @@ async def run_assist(
     cv_path: Optional[str],
     cl_path: Optional[str],
     extra_docs: Optional[list[dict]] = None,
+    docs_holder: Optional[dict] = None,
 ) -> None:
     """Open apply_url in the assist browser and keep auto-filling until the tab
-    closes or the lifetime expires. Runs as a fire-and-forget asyncio task."""
+    closes or the lifetime expires. Runs as a fire-and-forget asyncio task.
+
+    `docs_holder`, when given, is a mutable {"cv": path|None, "cl": path|None}
+    read fresh on every pass. This lets the browser open and start filling
+    profile fields IMMEDIATELY while the tailored CV / cover letter are still
+    being generated in the background; the moment they land in `docs_holder`,
+    the next fill pass uploads them. (When None, the fixed cv_path/cl_path are
+    used — the fast path for offers whose docs already exist.)"""
     js_rules = build_field_values(profile)
 
     browser = await AssistBrowser.get()
@@ -1454,10 +1601,16 @@ async def run_assist(
         try:
             if page.is_closed():
                 break
-            total_filled += await fill_pass(page, js_rules, cv_path, cl_path,
+            cv_p = docs_holder.get("cv") if docs_holder is not None else cv_path
+            cl_p = docs_holder.get("cl") if docs_holder is not None else cl_path
+            total_filled += await fill_pass(page, js_rules, cv_p, cl_p,
                                             extra_docs, state, profile)
-            badge = (f"Internship DB: auto-filled {total_filled} field(s) — review everything, "
-                     f"then submit yourself")
+            pending = docs_holder is not None and (docs_holder.get("cv") is None
+                                                   or docs_holder.get("cl") is None)
+            badge = (f"Internship DB: auto-filled {total_filled} field(s)"
+                     + (" — CV/cover letter still generating, they'll attach automatically"
+                        if pending else "")
+                     + " — review everything, then submit yourself")
             try:
                 await page.evaluate(_BADGE_JS, badge)
             except Exception:

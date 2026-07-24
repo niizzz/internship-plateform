@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -17,6 +18,12 @@ import httpx
 from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
 
 logger = logging.getLogger(__name__)
+
+# Lazard's Oracle site hosts BOTH Lazard (IB / advisory) and Lazard Frères
+# Gestion (the French asset-management arm) postings. Only LFG job descriptions
+# name "Lazard Frères Gestion" — IB/M&A ones never do — so this marker cleanly
+# routes each requisition to the right entity (see LazardFreresGestionScraper).
+_FRERES_GESTION_RE = re.compile(r"fr[eè]res\s+gestion", re.I)
 
 API = "https://icbpjb.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
 DETAILS_API = "https://icbpjb.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
@@ -43,6 +50,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0
 class LazardScraper(BankScraper):
     bank_name = "Lazard"
     careers_url = "https://www.lazard.com/careers/"
+    # When True, keep only Lazard Frères Gestion postings; when False, keep only
+    # the non-LFG (IB / advisory) ones. Both entities share this Oracle site.
+    freres_gestion_only = False
+
+    def _keep(self, o: ScrapedOffer) -> bool:
+        is_lfg = bool(o.description and _FRERES_GESTION_RE.search(o.description))
+        return is_lfg if self.freres_gestion_only else not is_lfg
 
     async def scrape(self) -> list[ScrapedOffer]:
         seen: set[str] = set()
@@ -71,22 +85,25 @@ class LazardScraper(BankScraper):
                             continue
                     seen.add(jid)
                     offers.append(ScrapedOffer(
-                        bank="Lazard",
+                        bank=self.bank_name,
                         external_id=jid,
                         role_title=item.get("Title") or "",
                         location=item.get("PrimaryLocation") or "",
                         apply_url=JOB_URL_TMPL.format(job_id=jid),
                         source_url=self.careers_url,
                         description=html_to_text(item.get("ExternalDescriptionStr") or "") or None,
+                        posted_raw=item.get("PostedDate"),  # Oracle HCM publication date
                     ))
 
             # Search results rarely carry ExternalDescriptionStr — fetch the
             # details endpoint for likely internships that are missing one.
             to_enrich = [o for o in offers if not o.description and _PROGRAM_RE.search(o.role_title.lower())]
             await asyncio.gather(*(self._enrich_one(client, o) for o in to_enrich))
-        logger.info("Lazard: collected %d Europe early-careers candidates (%d enriched)",
-                    len(offers), len(to_enrich))
-        return offers
+        # Route each requisition to the right entity (Lazard IB vs LFG).
+        kept = [o for o in offers if self._keep(o)]
+        logger.info("%s: collected %d of %d Europe early-careers candidates (%d enriched)",
+                    self.bank_name, len(kept), len(offers), len(to_enrich))
+        return kept
 
     async def _enrich_one(self, client: httpx.AsyncClient, o: ScrapedOffer) -> None:
         params = {

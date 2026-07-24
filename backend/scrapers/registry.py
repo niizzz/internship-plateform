@@ -32,6 +32,14 @@ from .bofa import BofAScraper
 from .commerzbank import CommerzbankScraper
 from .kepler import KeplerScraper
 from .nomura import NomuraScraper
+# Firms on standardized ATS platforms (config-driven, see scrapers/generic.py).
+from .bbva import BBVAScraper
+from .euronext import EuronextScraper
+from .rbc import RBCScraper
+from .cmc import CMCMarketsScraper
+from .amundi import AmundiScraper
+from .lazard_fg import LazardFreresGestionScraper
+from .maven import MavenSecuritiesScraper
 
 ALL_SCRAPERS: list[type[BankScraper]] = [
     JPMorganScraper,
@@ -53,6 +61,13 @@ ALL_SCRAPERS: list[type[BankScraper]] = [
     CommerzbankScraper,
     KeplerScraper,
     NomuraScraper,
+    BBVAScraper,
+    EuronextScraper,
+    RBCScraper,
+    CMCMarketsScraper,
+    AmundiScraper,
+    LazardFreresGestionScraper,
+    MavenSecuritiesScraper,
 ]
 
 

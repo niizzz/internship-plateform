@@ -120,6 +120,7 @@ class NatixisScraper(BankScraper):
                         source_url=_absolutize(detail) if detail else self.careers_url,
                         description=html_to_text(it.get("description") or "") or None,
                         program_type=_as_text(it.get("contract")) or None,
+                        posted_raw=it.get("date") or it.get("datetime"),  # bank's publication date
                     )
                 frm += PAGE_SIZE
                 if total is not None and frm >= total:

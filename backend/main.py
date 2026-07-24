@@ -9,7 +9,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -80,6 +80,7 @@ class OfferOut(BaseModel):
     description: Optional[str]
     apply_url: str
     source_url: Optional[str]
+    posted_at: Optional[datetime] = None  # when the BANK published it
     first_seen_at: datetime
     last_seen_at: datetime
     is_active: bool
@@ -113,6 +114,7 @@ def _offer_to_out(
         description=o.description,
         apply_url=o.apply_url,
         source_url=o.source_url,
+        posted_at=o.posted_at,
         first_seen_at=o.first_seen_at,
         last_seen_at=o.last_seen_at,
         is_active=o.is_active,
@@ -270,9 +272,16 @@ async def _do_refresh():
     global _last_refresh
     async with _refresh_lock:
         _last_refresh = {"status": "running", "started_at": datetime.utcnow(), "finished_at": None, "result": None}
+
+        def _progress(agg: dict) -> None:
+            # Live per-bank progress: banks are persisted as they finish, so the
+            # UI polls this and streams new offers in instead of waiting for the
+            # slowest scraper.
+            _last_refresh["result"] = agg
+
         try:
             scrapers = build_scrapers(headless=True)
-            result = await refresh_all(scrapers)
+            result = await refresh_all(scrapers, progress=_progress)
             _last_refresh = {
                 "status": "done",
                 "started_at": _last_refresh["started_at"],
@@ -387,14 +396,25 @@ def _tailor_offer_impl(session: Session, o: Offer, settings: Settings) -> Tailor
     offer_folder = OFFERS_DIR / f"{o.id}_{_slug(o.bank)}_{_slug(o.role_title)[:40]}"
     cv_out = render_cv_pdf(tailored_cv, offer_folder / "tailored_cv.pdf")
 
-    cl_text = generate_cover_letter(
+    cl_body = generate_cover_letter(
         base_cv_text=flatten_cv_text(base_cv), offer=offer_dict, base_cover_letter_text=base_cl_text,
     )
+    now = datetime.now()
+    letter_date = f"{now.day} {now.strftime('%B')} {now.year}"
+    signoff = "Sincerely,"
+    greeting = "Dear Recruiting Team,"
     header = {
         "name": base_cv.get("name"), "contact": base_cv.get("contact"),
         "linkedin_url": base_cv.get("linkedin_url"), "linkedin_label": base_cv.get("linkedin_label"),
+        "date": letter_date,
+        "recipient": [o.bank, "Recruiting Team"],
+        "greeting": greeting,
+        "signoff": signoff,
+        "signature": base_cv.get("name"),
     }
-    cl_out = render_cover_letter_pdf(cl_text, header, offer_folder / "cover_letter.pdf")
+    cl_out = render_cover_letter_pdf(cl_body, header, offer_folder / "cover_letter.pdf")
+    # Assemble a readable full-letter preview for the UI (the PDF adds the letterhead).
+    cl_text = f"{letter_date}\n\n{o.bank}\nRecruiting Team\n\n{greeting}\n\n{cl_body}\n\n{signoff}\n{base_cv.get('name')}"
 
     # Upsert TailoredDocument rows.
     for kind, path in ((DocumentKind.cv, cv_out), (DocumentKind.cover_letter, cl_out)):
@@ -430,7 +450,10 @@ def tailor_for_offer(offer_id: int, session: Session = Depends(get_session)):
     if not settings or not settings.base_cv_path or not Path(settings.base_cv_path).exists():
         raise HTTPException(400, "No base CV uploaded. Upload it in Settings first.")
     try:
-        return _tailor_offer_impl(session, o, settings)
+        # Serialize with the auto-tailor queue / background apply-tailoring so only
+        # one claude.exe runs at a time (this endpoint runs in FastAPI's threadpool).
+        with _tailor_run_lock:
+            return _tailor_offer_impl(session, o, settings)
     except ClaudeCliError as e:
         raise HTTPException(502, f"Claude CLI generation failed: {e}")
 
@@ -442,6 +465,10 @@ def tailor_for_offer(offer_id: int, session: Session = Depends(get_session)):
 import threading as _threading
 
 _tailor_queue_lock = _threading.Lock()
+# Serializes the actual generation work (2 Claude CLI calls per offer) across the
+# auto-tailor queue AND on-demand background tailoring from apply-assist, so only
+# one claude.exe runs at a time no matter which path triggered it.
+_tailor_run_lock = _threading.Lock()
 _tailor_state: dict = {
     "running": False, "total": 0, "done": 0, "failed": 0,
     "current": None, "last_error": None,
@@ -474,7 +501,8 @@ def _auto_tailor_worker(offer_ids: list[int]) -> None:
                     continue
                 _tailor_state["current"] = f"{o.bank} — {o.role_title}"
                 try:
-                    _tailor_offer_impl(session, o, settings)
+                    with _tailor_run_lock:
+                        _tailor_offer_impl(session, o, settings)
                     _tailor_state["done"] += 1
                 except Exception as e:
                     logger.warning("Auto-tailor failed for offer %s: %s", oid, e)
@@ -769,19 +797,32 @@ async def apply_assist(
     cv_path = _resolve_doc_path(session, offer_id, DocumentKind.cv, body.cv_source, settings)
     cl_path = _resolve_doc_path(session, offer_id, DocumentKind.cover_letter, body.cl_source, settings)
 
-    # On-demand tailoring: documents are only generated when the user applies.
-    # Takes ~1-2 min (two Claude CLI calls); run off the event loop.
     needs_tailored = (body.cv_source == "tailored" and not cv_path) or \
                      (body.cl_source == "tailored" and not cl_path)
-    if needs_tailored:
-        if not settings.base_cv_path or not Path(settings.base_cv_path).exists():
-            raise HTTPException(400, "No base CV uploaded. Upload it in Settings first.")
-        try:
-            await asyncio.to_thread(_tailor_offer_impl, session, o, settings)
-        except ClaudeCliError as e:
-            raise HTTPException(502, f"Tailoring failed: {e}")
-        cv_path = _resolve_doc_path(session, offer_id, DocumentKind.cv, body.cv_source, settings)
-        cl_path = _resolve_doc_path(session, offer_id, DocumentKind.cover_letter, body.cl_source, settings)
+    if needs_tailored and (not settings.base_cv_path or not Path(settings.base_cv_path).exists()):
+        raise HTTPException(400, "No base CV uploaded. Upload it in Settings first.")
+
+    # Mutable doc paths the assist loop re-reads every pass. Seed with whatever
+    # already exists; if the tailored docs are missing they're generated in a
+    # BACKGROUND thread and dropped in here when ready — so the browser opens and
+    # starts filling profile fields immediately instead of blocking ~1-2 min on
+    # generation (that block was why some offers felt slow to launch and others
+    # instant, depending purely on whether their docs happened to be pre-made).
+    docs_holder = {
+        "cv": str(cv_path) if cv_path else None,
+        "cl": str(cl_path) if cl_path else None,
+    }
+
+    # Snapshot everything the background thread + assist task need before the
+    # request's DB session closes.
+    apply_url = o.apply_url
+    cv_source, cl_source = body.cv_source, body.cl_source
+    profile = {f: getattr(settings, f) for f in _PROFILE_FIELDS}
+    # Extras (place of birth, ...) + the offer's country, so the engine can
+    # answer right-to-work/sponsorship questions per jurisdiction.
+    profile["extras_json"] = settings.extras_json or {}
+    profile["offer_country"] = o.country
+    extra_docs = [d for d in (settings.extra_documents or []) if d.get("path") and Path(d["path"]).exists()]
 
     # Mark as applied immediately (user reviews + submits in browser).
     app_row = session.exec(select(Application).where(Application.offer_id == offer_id)).first()
@@ -793,40 +834,58 @@ async def apply_assist(
         app_row.applied_at = datetime.utcnow()
     app_row.updated_at = datetime.utcnow()
     session.commit()
+    app_status = app_row.status.value
 
-    # Launch the assist browser: visible window, persistent profile (ATS logins
-    # survive between applications), auto-fills profile fields and uploads the
-    # chosen documents on every page of the flow. User reviews and submits.
+    # Background tailoring (only when docs are missing): its own DB session, its
+    # own claude.exe (serialized by _tailor_run_lock). When done it updates
+    # docs_holder, and the already-running assist loop uploads the docs next pass.
+    if needs_tailored:
+        def _bg_tailor() -> None:
+            try:
+                with _tailor_run_lock:
+                    with Session(ENGINE) as s2:
+                        o2 = s2.get(Offer, offer_id)
+                        st2 = s2.get(Settings, 1)
+                        if not o2 or not st2:
+                            return
+                        _tailor_offer_impl(s2, o2, st2)
+                        cvp = _resolve_doc_path(s2, offer_id, DocumentKind.cv, cv_source, st2)
+                        clp = _resolve_doc_path(s2, offer_id, DocumentKind.cover_letter, cl_source, st2)
+                        if cvp:
+                            docs_holder["cv"] = str(cvp)
+                        if clp:
+                            docs_holder["cl"] = str(clp)
+                logger.info("apply-assist: background tailoring ready for offer %s", offer_id)
+            except Exception as e:
+                logger.warning("apply-assist: background tailoring failed for offer %s: %s", offer_id, e)
+        _threading.Thread(target=_bg_tailor, daemon=True).start()
+
+    # Launch the assist browser NOW: visible window, persistent profile (ATS
+    # logins survive between applications), auto-fills profile fields and uploads
+    # the documents (as soon as they exist) on every page. User reviews + submits.
     import asyncio as _asyncio
     from apply_assist import run_assist
-
-    profile = {f: getattr(settings, f) for f in _PROFILE_FIELDS}
-    # Extras (place of birth, ...) + the offer's country, so the engine can
-    # answer right-to-work/sponsorship questions per jurisdiction.
-    profile["extras_json"] = settings.extras_json or {}
-    profile["offer_country"] = o.country
-    extra_docs = [d for d in (settings.extra_documents or []) if d.get("path") and Path(d["path"]).exists()]
 
     async def _assist():
         try:
             await run_assist(
-                o.apply_url, profile,
-                str(cv_path) if cv_path else None,
-                str(cl_path) if cl_path else None,
-                extra_docs=extra_docs,
+                apply_url, profile,
+                docs_holder.get("cv"), docs_holder.get("cl"),
+                extra_docs=extra_docs, docs_holder=docs_holder,
             )
         except Exception as e:
             logger.warning("apply-assist failed: %s", e)
 
     _asyncio.create_task(_assist())
     return {
-        "apply_url": o.apply_url,
-        "cv_path": str(cv_path) if cv_path else None,
-        "cl_path": str(cl_path) if cl_path else None,
-        "cv_source": body.cv_source,
-        "cl_source": body.cl_source,
+        "apply_url": apply_url,
+        "cv_path": docs_holder.get("cv"),
+        "cl_path": docs_holder.get("cl"),
+        "cv_source": cv_source,
+        "cl_source": cl_source,
         "profile": profile,
-        "application_status": app_row.status.value,
+        "application_status": app_status,
+        "tailoring": needs_tailored,
     }
 
 
@@ -852,6 +911,136 @@ def stats(session: Session = Depends(get_session)):
         "by_status": by_status,
         "by_bank": by_bank,
         "unread_notifications": notif_count,
+    }
+
+
+# ---------- Dashboard analytics ---------------------------------------------
+
+_SENT = {
+    ApplicationStatus.applied, ApplicationStatus.online_assessment,
+    ApplicationStatus.interview, ApplicationStatus.offer, ApplicationStatus.rejected,
+}
+_RESPONDED = {  # anything past "applied" — a reply of any kind, incl. a rejection
+    ApplicationStatus.online_assessment, ApplicationStatus.interview,
+    ApplicationStatus.offer, ApplicationStatus.rejected,
+}
+_INTERVIEWED = {ApplicationStatus.interview, ApplicationStatus.offer}
+
+
+@app.get("/api/dashboard")
+def dashboard(session: Session = Depends(get_session)):
+    """Everything the live desk dashboard needs in one call: the application
+    funnel (sent / responses / interviews / offers with period deltas), a daily
+    time series for the applications-over-time chart, the offer pipeline, the
+    newest offers with their on-site age, and a merged recent-activity feed."""
+    now = datetime.utcnow()
+    today = now.date()
+    week_ago = now - timedelta(days=7)
+    month_start = datetime(now.year, now.month, 1)
+    last_month_end = month_start - timedelta(seconds=1)
+    last_month_start = datetime(last_month_end.year, last_month_end.month, 1)
+
+    apps = session.exec(select(Application)).all()
+    offers = session.exec(select(Offer).where(Offer.is_active == True)).all()  # noqa: E712
+    app_by_offer = {a.offer_id: a for a in apps}
+
+    sent = [a for a in apps if a.status in _SENT]
+    responded = [a for a in apps if a.status in _RESPONDED]
+    interviewed = [a for a in apps if a.status in _INTERVIEWED]
+    offers_won = [a for a in apps if a.status == ApplicationStatus.offer]
+    ghosted = [a for a in apps if a.status == ApplicationStatus.applied]
+
+    def sent_in(lo: datetime, hi: Optional[datetime] = None) -> int:
+        return sum(1 for a in sent if a.applied_at and a.applied_at >= lo
+                   and (hi is None or a.applied_at <= hi))
+
+    sent_today = sum(1 for a in sent if a.applied_at and a.applied_at.date() == today)
+    sent_this_month = sent_in(month_start)
+    sent_last_month = sent_in(last_month_start, last_month_end)
+    interviews_this_week = sum(1 for a in interviewed if a.updated_at and a.updated_at >= week_ago)
+
+    hit_rate = round(100 * len(responded) / len(sent), 1) if sent else 0.0
+    ghost_rate = round(100 * len(ghosted) / len(sent), 1) if sent else 0.0
+
+    # Consecutive-day streak of at least one application, ending today or yesterday.
+    sent_days = {a.applied_at.date() for a in sent if a.applied_at}
+    streak = 0
+    cursor = today if today in sent_days else today - timedelta(days=1)
+    while cursor in sent_days:
+        streak += 1
+        cursor -= timedelta(days=1)
+
+    # 30-day daily series: applications sent, and offers discovered (both real,
+    # single-series charts — offers keeps the view alive before the funnel fills).
+    apps_series, offers_series = [], []
+    for i in range(29, -1, -1):
+        d = today - timedelta(days=i)
+        apps_series.append({"date": d.isoformat(),
+                            "count": sum(1 for a in sent if a.applied_at and a.applied_at.date() == d)})
+        offers_series.append({"date": d.isoformat(),
+                             "count": sum(1 for o in offers if o.first_seen_at and o.first_seen_at.date() == d)})
+
+    # Active-offer pipeline by application status (an offer with no Application
+    # row counts as not_applied).
+    by_status = {st.value: 0 for st in ApplicationStatus}
+    by_category: dict = {}
+    for o in offers:
+        a = app_by_offer.get(o.id)
+        st = a.status.value if a else ApplicationStatus.not_applied.value
+        by_status[st] = by_status.get(st, 0) + 1
+        by_category[o.category.value] = by_category.get(o.category.value, 0) + 1
+
+    new_today = sum(1 for o in offers if o.first_seen_at and o.first_seen_at.date() == today)
+    new_this_week = sum(1 for o in offers if o.first_seen_at and o.first_seen_at >= week_ago)
+
+    def age_days(o: Offer) -> int:
+        return max(0, (now - o.first_seen_at).days) if o.first_seen_at else 0
+
+    recent = sorted(offers, key=lambda o: o.first_seen_at or now, reverse=True)[:10]
+    recent_offers = [{
+        "id": o.id, "bank": o.bank, "role_title": o.role_title, "category": o.category.value,
+        "city": o.city, "country": o.country, "start_date_raw": o.start_date_raw,
+        "first_seen_at": o.first_seen_at.isoformat() if o.first_seen_at else None,
+        "posted_at": o.posted_at.isoformat() if o.posted_at else None,
+        "age_days": age_days(o),
+        "application_status": (app_by_offer[o.id].status.value
+                               if o.id in app_by_offer else ApplicationStatus.not_applied.value),
+    } for o in recent]
+
+    # Merged activity feed: application status changes + fresh offer discoveries.
+    activity = []
+    for a in apps:
+        if a.status != ApplicationStatus.not_applied and a.updated_at:
+            o = next((x for x in offers if x.id == a.offer_id), None)
+            if o:
+                activity.append({"kind": "app", "id": o.id, "bank": o.bank,
+                                 "role_title": o.role_title, "label": a.status.value,
+                                 "at": a.updated_at.isoformat()})
+    for o in recent:
+        activity.append({"kind": "offer_new", "id": o.id, "bank": o.bank,
+                         "role_title": o.role_title, "label": "new",
+                         "at": o.first_seen_at.isoformat() if o.first_seen_at else now.isoformat()})
+    activity.sort(key=lambda x: x["at"], reverse=True)
+    activity = activity[:14]
+
+    return {
+        "generated_at": now.isoformat(),
+        "funnel": {
+            "apps_sent": len(sent), "responses": len(responded),
+            "interviews": len(interviewed), "offers": len(offers_won),
+            "sent_today": sent_today, "sent_this_week": sent_in(week_ago),
+            "sent_this_month": sent_this_month, "sent_last_month": sent_last_month,
+            "interviews_this_week": interviews_this_week,
+            "hit_rate": hit_rate, "ghost_rate": ghost_rate, "streak_days": streak,
+        },
+        "pipeline": {
+            "active_offers": len(offers), "new_today": new_today, "new_this_week": new_this_week,
+            "by_status": by_status, "by_category": by_category,
+        },
+        "apps_series": apps_series,
+        "offers_series": offers_series,
+        "recent_offers": recent_offers,
+        "activity": activity,
     }
 
 

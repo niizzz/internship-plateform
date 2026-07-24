@@ -57,6 +57,7 @@ class Offer(SQLModel, table=True):
     city: Optional[str] = None
     start_date_raw: Optional[str] = None
     start_date_parsed: Optional[date] = None
+    posted_at: Optional[datetime] = None  # when the bank published the posting
     duration: Optional[str] = None
     program_type: ProgramType = Field(default=ProgramType.other)
     description: Optional[str] = None
@@ -162,10 +163,17 @@ def _migrate_settings(conn) -> None:
             conn.exec_driver_sql(f'ALTER TABLE settings ADD COLUMN "{name}" {sqltype}')
 
 
+def _migrate_offer(conn) -> None:
+    cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(offer)").fetchall()}
+    if "posted_at" not in cols:
+        conn.exec_driver_sql('ALTER TABLE offer ADD COLUMN "posted_at" DATETIME')
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(ENGINE)
     with ENGINE.begin() as conn:
         _migrate_settings(conn)
+        _migrate_offer(conn)
     # Ensure single Settings row exists.
     with Session(ENGINE) as s:
         if not s.get(Settings, 1):

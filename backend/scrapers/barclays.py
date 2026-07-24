@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 SEARCH_TMPL = "https://search.jobs.barclays/search-jobs/{kw}/13015/{page}"
 
-# Phenom search is substring-based: "intern" covers internship, "placement"
-# covers industrial placement — fewer sweeps, same coverage.
+# Phenom search is substring-based: "intern" covers internship/off-cycle intern,
+# "placement" covers industrial placement, "graduate" covers early-careers — so a
+# small, high-recall set keeps the (Playwright, serial) sweep fast.
 QUERIES = [
-    "intern", "summer analyst", "off-cycle", "graduate",
-    "spring", "apprentice", "placement", "early careers",
+    "intern", "graduate", "placement", "spring", "apprentice",
 ]
 
 EU_HINTS = [
@@ -56,16 +56,16 @@ class BarclaysScraper(BankScraper):
             # Fresh tab per keyword — Phenom soft-throttles rapid same-tab nav.
             page = await self.new_page()
             try:
-                for page_no in range(1, 6):
+                for page_no in range(1, 4):
                     url = SEARCH_TMPL.format(kw=kw_path, page=page_no)
                     cards = []
                     # The result list is injected after the search XHR resolves;
                     # wait for the first job link instead of a fixed 2s pause.
                     for attempt in range(2):
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                             try:
-                                await page.wait_for_selector('a[href*="/job/"]', timeout=10_000)
+                                await page.wait_for_selector('a[href*="/job/"]', timeout=6_000)
                             except Exception:
                                 pass
                             await page.wait_for_timeout(400)
@@ -106,7 +106,10 @@ class BarclaysScraper(BankScraper):
                 await page.close()
             logger.info("Barclays kw=%r added %d EU offers", kw, kw_added)
 
-        to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
+        # Enrichment is serial Playwright navigation — cap it so the tail can't
+        # blow the refresh budget (the S&T filter only needs a description for
+        # generic-titled roles anyway).
+        to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())][:12]
         if to_enrich:
             page = await self.new_page()
             try:

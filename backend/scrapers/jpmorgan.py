@@ -78,6 +78,7 @@ class JPMorganScraper(BankScraper):
                         apply_url=JOB_URL_TMPL.format(job_id=job_id),
                         source_url=self.careers_url,
                         description=html_to_text(item.get("ExternalDescriptionStr") or "") or None,
+                        posted_raw=item.get("PostedDate"),
                         extras={
                             "posted_date": item.get("PostedDate"),
                             "job_family": item.get("JobFamily"),

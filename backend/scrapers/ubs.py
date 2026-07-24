@@ -14,7 +14,8 @@ from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
 
 logger = logging.getLogger(__name__)
 
-MAX_DETAIL_PAGES = 20  # detail visits are Playwright navigations — keep bounded
+MAX_DETAIL_PAGES = 10  # detail visits are Playwright navigations — keep bounded
+MAX_LIST_PAGES = 10    # BrassRing pages; each next-click waits on the network
 
 LISTING_URL = "https://jobs.ubs.com/TGnewUI/Search/home/HomeWithPreLoad?partnerid=25008&siteid=5012&PageType=searchResults"
 JOB_URL_TMPL = "https://jobs.ubs.com/TGnewUI/Search/home/HomeWithPreLoad?partnerid=25008&siteid=5012&PageType=JobDetails&jobid={jobid}"
@@ -34,7 +35,7 @@ class UBSScraper(BankScraper):
             await page.wait_for_timeout(1500)
 
             # Paginate by clicking "next" pagination links until they disappear
-            for _ in range(30):
+            for _ in range(MAX_LIST_PAGES):
                 await self._scroll_full(page)
                 await self._collect(page, offers)
                 # BrassRing pagination — look for next-page link
@@ -45,8 +46,8 @@ class UBSScraper(BankScraper):
                     break
                 try:
                     await next_btn.click(timeout=2_000)
-                    await page.wait_for_load_state("networkidle", timeout=8_000)
-                    await page.wait_for_timeout(700)
+                    await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+                    await page.wait_for_timeout(500)
                 except Exception:
                     break
         finally:
@@ -70,7 +71,7 @@ class UBSScraper(BankScraper):
                     await page.goto(o.apply_url, wait_until="domcontentloaded", timeout=30_000)
                     try:
                         await page.wait_for_selector(
-                            ".jobdescription, [class*='jobDescription'], .jobDisplay", timeout=8_000)
+                            ".jobdescription, [class*='jobDescription'], .jobDisplay", timeout=5_000)
                     except Exception:
                         pass
                     raw = await page.evaluate(

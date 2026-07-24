@@ -2,6 +2,7 @@ import { useParams, Link } from 'react-router-dom'
 import { useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api, ApplicationStatus, STATUS_LABEL, TailorResult, DocSource, CATEGORY_COLOR } from '../api'
+import { postedInfo } from '../lib/format'
 import StatusBadge from '../components/StatusBadge'
 import OfferDescription from '../components/OfferDescription'
 
@@ -47,7 +48,11 @@ export default function OfferDetailPage() {
   const applyAssist = useMutation({
     mutationFn: () => api.applyAssist(offerId, { cv_source: cvChoice, cl_source: clChoice }),
     onSuccess: (r) => {
-      setAssistMsg(`Browser opened. CV: ${r.cv_path ? '✓' : '✗ missing'} · CL: ${r.cl_path ? '✓' : '✗ missing'}.`)
+      setAssistMsg(
+        r.tailoring
+          ? 'Browser opened — filling your details now. Your tailored CV & cover letter are generating in the background and will attach automatically (~1–2 min).'
+          : `Browser opened — filling now. CV ${r.cv_path ? '✓' : '✗ missing'} · CL ${r.cl_path ? '✓' : '✗ missing'}.`
+      )
       qc.invalidateQueries({ queryKey: ['offer', offerId] })
       qc.invalidateQueries({ queryKey: ['offers'] })
     },
@@ -98,6 +103,17 @@ export default function OfferDetailPage() {
               Source page
             </a>
           )}
+        </div>
+
+        <div className="relative mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="rounded-lg border border-neon-cyan/40 bg-neon-cyan/10 px-3 py-2">
+            <div className="text-[9px] uppercase tracking-[0.18em] text-neon-cyan/70 font-mono">Start date</div>
+            <div className="text-base font-semibold text-neon-cyan mt-0.5 leading-tight">{offer.start_date_raw || 'See posting'}</div>
+          </div>
+          <KeyFact label="Duration" value={offer.duration || '—'} />
+          <KeyFact label="Program" value={offer.program_type.replace(/_/g, ' ')} />
+          {(() => { const p = postedInfo(offer.posted_at, offer.first_seen_at)
+            return <KeyFact label={p.label} value={p.value} /> })()}
         </div>
 
         {offer.description && (
@@ -199,7 +215,7 @@ export default function OfferDetailPage() {
           onClick={() => applyAssist.mutate()}
           disabled={applyAssist.isPending}
           className="btn-neon px-3 py-1.5 rounded-md bg-neon-cyan text-ink-950 text-sm font-semibold hover:bg-cyan-300 disabled:opacity-50">
-          {applyAssist.isPending ? 'Preparing documents & launching… (first time ~1-2 min)' : 'Apply with pre-fill assist →'}
+          {applyAssist.isPending ? 'Launching browser…' : 'Apply with pre-fill assist →'}
         </button>
         {assistMsg && <div className="mt-2 text-xs text-slate-300 font-mono">{assistMsg}</div>}
       </section>
@@ -249,6 +265,15 @@ function DocChoice(props: {
         }`}>
         ↓ download {props.choice}
       </a>
+    </div>
+  )
+}
+
+function KeyFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-ink-700 bg-ink-950/50 px-3 py-2">
+      <div className="text-[9px] uppercase tracking-[0.18em] text-slate-500 font-mono">{label}</div>
+      <div className="text-sm text-slate-200 mt-0.5 leading-tight capitalize truncate">{value}</div>
     </div>
   )
 }

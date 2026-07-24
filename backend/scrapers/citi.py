@@ -96,6 +96,7 @@ class CitiScraper(BankScraper):
                         location=p.get("locationsText") or "",
                         apply_url=JOB_URL_TMPL.format(external_path=ext_path),
                         source_url=self.careers_url,
+                        posted_raw=p.get("postedOn"),  # relative; enrich overrides with absolute startDate
                         extras={"posted_on": p.get("postedOn"), "external_path": ext_path},
                     ))
                 # Workday returns total=0 on subsequent paginated requests with the
@@ -131,9 +132,11 @@ class CitiScraper(BankScraper):
                         return
                     await asyncio.sleep(0.2)
                 jp = d.get("jobPostingInfo", {})
-                # NB: Workday's jobPostingInfo.startDate is the POSTING date,
-                # not the job start — the orchestrator derives the real start
-                # date from title/description instead.
+                # NB: Workday's jobPostingInfo.startDate is the POSTING date
+                # (absolute), not the job start — use it as the posted date but
+                # derive the real START date from title/description instead.
+                if jp.get("startDate"):
+                    o.posted_raw = jp.get("startDate")
                 clean = html_to_text(jp.get("jobDescription") or "")
                 if clean:
                     o.description = clean

@@ -140,6 +140,8 @@ class CommerzbankScraper(BankScraper):
             clean = html_to_text(_htmllib.unescape(data.get("description") or ""))
             if clean:
                 o.description = clean
+            if data.get("datePosted"):
+                o.posted_raw = data.get("datePosted")
             # JSON-LD title is often more complete ("... (m/f/diverse)").
             title = data.get("title")
             if title and len(title) > len(o.role_title):

@@ -20,14 +20,14 @@ import re
 
 import httpx
 
-from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
+from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text, in_europe
 
 logger = logging.getLogger(__name__)
 
 SEARCH_PAGE = "https://careers.societegenerale.com/en/search"
 PROXY_PATH = "/search-proxy.php"
-PAGE_SIZE = 10  # the proxy rejects larger skipCount
-MAX_OFFERS = 2000
+PAGE_SIZE = 10   # the proxy rejects larger skipCount
+MAX_OFFERS = 1000  # ~100 proxy calls; S&T early-careers roles are well within this
 
 _ID_RE = re.compile(r"-([0-9A-Za-z]{6,})-[a-z]{2}$")
 
@@ -70,8 +70,17 @@ class SocGenScraper(BankScraper):
 
         page.on("request", on_req)
         try:
-            await page.goto(SEARCH_PAGE, wait_until="networkidle", timeout=45_000)
-            await page.wait_for_timeout(4000)
+            # domcontentloaded, not networkidle: the SocGen SPA polls in the
+            # background and may never reach networkidle (a 45s hang). The JWT we
+            # need rides the page's own search XHR — poll for it instead.
+            try:
+                await page.goto(SEARCH_PAGE, wait_until="domcontentloaded", timeout=30_000)
+            except Exception:
+                pass
+            for _ in range(30):          # up to ~15s for the search XHR to fire
+                if captured.get("auth"):
+                    break
+                await page.wait_for_timeout(500)
             if not captured.get("auth"):
                 logger.warning("SocGen: could not capture proxy auth headers")
                 return []
@@ -85,8 +94,11 @@ class SocGenScraper(BankScraper):
                     # token (re-fires the native request) and retry once.
                     logger.info("SocGen: refreshing token at skip=%d", skip_from)
                     try:
-                        await page.goto(SEARCH_PAGE, wait_until="networkidle", timeout=45_000)
-                        await page.wait_for_timeout(3000)
+                        try:
+                            await page.goto(SEARCH_PAGE, wait_until="domcontentloaded", timeout=30_000)
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(2500)  # let the fresh JWT XHR fire
                     except Exception:
                         pass
                     batch = await self._fetch_page(page, captured, skip_from)
@@ -121,8 +133,12 @@ class SocGenScraper(BankScraper):
         # plain Drupal (only the search proxy is bot-walled), so fetch them
         # with httpx for likely early-careers roles and read the JobPosting
         # JSON-LD (description + datePosted) with an HTML fallback.
+        # Only European early-careers roles survive the orchestrator filter, so
+        # only fetch descriptions for those (SocGen has ~1250 jobs of every kind;
+        # enriching all program-matching ones was the slow tail). Capped for safety.
         to_enrich = [o for o in offers.values()
-                     if o.apply_url and _PROGRAM_RE.search(o.role_title.lower())]
+                     if o.apply_url and _PROGRAM_RE.search(o.role_title.lower())
+                     and in_europe(o.location or "")][:40]
         await self._enrich(to_enrich)
 
         logger.info("Société Générale: collected %d offers (%d enriched)", len(offers), len(to_enrich))
@@ -172,6 +188,11 @@ class SocGenScraper(BankScraper):
                 md = re.search(r"start date\s*:?\s*(\d{4}/\d{2}/\d{2})", clean, re.I)
                 if md:
                     o.start_date_raw = md.group(1)
+                # The header block also carries the bank's own publication date —
+                # grab it for posted_at BEFORE that block gets dropped below.
+                mp = re.search(r"publication date\s*:?\s*(\d{4}/\d{2}/\d{2})", clean, re.I)
+                if mp:
+                    o.posted_raw = mp.group(1)
                 # Drop the page-header block (breadcrumb / Apply / reference /
                 # dates) — the actual posting starts after "Publication date".
                 idx = clean.lower().find("publication date")

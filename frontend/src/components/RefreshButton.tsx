@@ -25,8 +25,22 @@ export default function RefreshButton() {
     }
   }, [status?.status, qc])
 
+  // Banks are persisted as each scraper finishes, so stream new offers into the
+  // list live: whenever the "done" count ticks up, refetch offers + stats.
+  const done: number | undefined = status?.result?.done
+  useEffect(() => {
+    if (status?.status === 'running' && typeof done === 'number') {
+      qc.invalidateQueries({ queryKey: ['offers'] })
+      qc.invalidateQueries({ queryKey: ['stats'] })
+      qc.invalidateQueries({ queryKey: ['notifications'] })
+    }
+  }, [done, status?.status, qc])
+
   const running = polling || status?.status === 'running' || trigger.isPending
-  const label = running ? 'Scraping…' : 'Refresh'
+  const total: number | undefined = status?.result?.total
+  const label = running
+    ? (typeof done === 'number' && typeof total === 'number' ? `Scraping ${done}/${total}…` : 'Scraping…')
+    : 'Refresh'
 
   return (
     <button

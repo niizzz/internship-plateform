@@ -70,8 +70,9 @@ class BNPParibasScraper(BankScraper):
                         source_url=self.careers_url,
                         description=desc or None,
                         program_type=_clean(str(it.get("programme") or "")) or None,
-                        # date_posted is the POSTING date, not the start date —
-                        # the orchestrator derives the real one from the text.
+                        # date_posted / WordPress `date` is the POSTING date (used
+                        # for posted_at); the real START date is derived from text.
+                        posted_raw=it.get("date_posted") or it.get("date"),
                     )
                 page += 1
                 if len(items) < PER_PAGE:

@@ -31,6 +31,7 @@ SNT_CASES = [
     ("FIC Off-Cycle", "", "markets", "BNP FIC abbreviation"),
     ("Secured Financing Structuring", "", "structuring", "structuring desk"),
     ("Automated Market Making (AMM)", "", "markets", "market making"),
+    ("Commercial & Investment Banking - Markets - Off-Cycle Internship - London", "", "markets", "JPM CIB-Markets division = S&T"),
     # KEEP — generic title rescued by an UNAMBIGUOUS desk phrase in desc
     ("Summer Analyst", "Join our Global Markets division covering Fixed Income, FX and Equities.",
      "markets", "generic title, strong desk phrase in desc"),
@@ -70,6 +71,8 @@ SNT_CASES = [
     ("Compliance Officer", "Markets surveillance.", None, "compliance"),
     ("Private Banking Sales Intern", "FX and equities for HNW clients.", None, "PB sales not SNT"),
     ("Software Engineer - Markets", "", None, "tech role mentioning markets"),
+    ("Equity Capital Markets Analyst", "", None, "ECM = banking; no delimiter before 'markets'"),
+    ("2027 Corporate & Investment Bank - Global Investment Banking - Off-Cycle Internship", "", None, "JPM Global IB = coverage"),
     ("Asset Management Summer Analyst", "", None, "AM"),
     ("HR Intern", "", None, "HR"),
 ]

@@ -77,6 +77,7 @@ class BofAScraper(BankScraper):
                         apply_url=(JOB_URL_PREFIX + path) if path.startswith("/") else (path or self.careers_url),
                         source_url=self.careers_url,
                         description=html_to_text(j.get("jobDescriptionExternal") or "") or None,
+                        posted_raw=j.get("postedDate"),
                         extras={"division": j.get("division"), "posted": j.get("postedDate")},
                     )
                 start += PAGE_SIZE

@@ -89,6 +89,7 @@ class KeplerScraper(BankScraper):
             apply_url=job_url,
             source_url=self.careers_url,
             description=description or None,
+            posted_raw=item.get("date_published"),  # Teamtailor JSON-Feed publish date
         )
 
     def _extract_city(self, title: str, description: str) -> str | None:

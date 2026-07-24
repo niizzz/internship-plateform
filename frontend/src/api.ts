@@ -15,6 +15,7 @@ export interface Offer {
   description: string | null
   apply_url: string
   source_url: string | null
+  posted_at: string | null   // when the BANK published it (null if not exposed)
   first_seen_at: string
   last_seen_at: string
   is_active: boolean
@@ -94,6 +95,7 @@ export interface ApplyAssistResult {
   cl_source: DocSource
   profile: Profile
   application_status: ApplicationStatus
+  tailoring?: boolean  // docs are being generated in the background and will attach when ready
 }
 
 export interface Stats {
@@ -101,6 +103,35 @@ export interface Stats {
   by_status: Record<string, number>
   by_bank: Record<string, number>
   unread_notifications: number
+}
+
+export interface DashboardFunnel {
+  apps_sent: number; responses: number; interviews: number; offers: number
+  sent_today: number; sent_this_week: number; sent_this_month: number; sent_last_month: number
+  interviews_this_week: number; hit_rate: number; ghost_rate: number; streak_days: number
+}
+export interface DashboardPipeline {
+  active_offers: number; new_today: number; new_this_week: number
+  by_status: Record<string, number>; by_category: Record<string, number>
+}
+export interface SeriesPoint { date: string; count: number }
+export interface RecentOffer {
+  id: number; bank: string; role_title: string; category: string
+  city: string | null; country: string; start_date_raw: string | null
+  first_seen_at: string | null; posted_at: string | null
+  age_days: number; application_status: ApplicationStatus
+}
+export interface ActivityItem {
+  kind: 'app' | 'offer_new'; id: number; bank: string; role_title: string; label: string; at: string
+}
+export interface DashboardData {
+  generated_at: string
+  funnel: DashboardFunnel
+  pipeline: DashboardPipeline
+  apps_series: SeriesPoint[]
+  offers_series: SeriesPoint[]
+  recent_offers: RecentOffer[]
+  activity: ActivityItem[]
 }
 
 export interface TailorResult {
@@ -179,6 +210,7 @@ export const api = {
   getProfile: () => jget<Profile>('/api/profile'),
   updateProfile: (body: Profile) => jsend<Profile>('PUT', '/api/profile', body),
   stats: () => jget<Stats>('/api/stats'),
+  dashboard: () => jget<DashboardData>('/api/dashboard'),
 }
 
 export const STATUS_LABEL: Record<ApplicationStatus, string> = {

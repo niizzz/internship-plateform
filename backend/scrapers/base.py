@@ -4,7 +4,7 @@ import html as _htmllib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, async_playwright
@@ -71,6 +71,9 @@ class ScrapedOffer:
     description: Optional[str] = None
     start_date_raw: Optional[str] = None
     start_date_parsed: Optional[date] = None
+    # When the BANK first published the posting (not when we scraped it). Raw
+    # value straight from the ATS; the orchestrator parses it into Offer.posted_at.
+    posted_raw: Optional[str] = None
     duration: Optional[str] = None
     program_type: Optional[str] = None
     category: Optional[str] = None
@@ -233,6 +236,33 @@ _VERY_STRONG_SNT = re.compile(
     r")\b"
 )
 
+# "… - Markets - …" / "CIB - Markets" division segment. Banks (esp. JPMorgan)
+# name their S&T arm just "Markets" and hang it under a "Commercial & Investment
+# Bank(ing)" umbrella, so the title carries BOTH "investment banking" (a
+# banking-only term) and the bare word "markets" — which _STRONG_SNT doesn't
+# catch (it only knows "global markets" / "markets division"). A "markets"
+# preceded by a delimiter (-, –, |, :, /) is that division name = S&T. It does
+# NOT match "capital markets" / "equity capital markets" (ECM/DCM = banking),
+# where "markets" is preceded by a word, not a delimiter.
+_MARKETS_DIVISION = re.compile(r"[-–—|:/]\s*markets\b")
+
+# Hard non-front-office FUNCTIONS. When one of these is in the title, a "- Markets"
+# division segment does NOT rescue it — "Software Engineer - Markets" just names
+# the division a tech/ops/risk/control role supports, it isn't front-office S&T.
+# (The rescue is meant only for umbrella titles like "Investment Banking - Markets".)
+_HARD_NON_FO = re.compile(
+    r"\b(software engineer|developer|technology|cyber\w*|data engineer|devops|"
+    r"operations|settlement(?:s)?|reconciliation|custody|fund servicing|fund administration|"
+    r"post[\s-]?trad(?:e|ing)|middle office|back office|reference data|securities services|"
+    r"trade lifecycle|trade support|"
+    r"market risk|credit risk|counterparty risk|operational risk|liquidity risk|"
+    r"model risk|risk management|prudential|"
+    r"product control|valuation control|financial control|business control|"
+    r"compliance|kyc|aml|anti[-\s]?financial crime|financial crime|fraud|sanctions|"
+    r"audit|tax|\bhr\b|human resources|legal|marketing|communications|"
+    r"esg|sustainability|regulatory|governance|onboarding)\b"
+)
+
 # Sales-adjacent terms that need a markets context anchor to count.
 _SALES_TERMS = re.compile(r"\b(sales|distribution|client coverage|institutional sales)\b")
 _MARKETS_ANCHOR = re.compile(
@@ -273,11 +303,20 @@ def is_snt_role(title: str, description: str = "") -> Optional[str]:
     """
     title_l = title.lower()
 
-    if _BANKING_ONLY_TITLE.search(title_l) and not _STRONG_SNT.search(title_l):
+    # A strong S&T title marker OR a delimited "- Markets" division segment
+    # overrides the banking-only gate. The "- Markets" rescue is suppressed when
+    # the title also names a hard non-front-office function, so
+    # "Software Engineer - Markets" stays out while
+    # "Commercial & Investment Banking - Markets - Off-Cycle Internship" comes in.
+    title_strong = bool(_STRONG_SNT.search(title_l))
+    if not title_strong and _MARKETS_DIVISION.search(title_l) and not _HARD_NON_FO.search(title_l):
+        title_strong = True
+
+    if _BANKING_ONLY_TITLE.search(title_l) and not title_strong:
         return None
 
     # Title-based detection (full strong set).
-    if _STRONG_SNT.search(title_l):
+    if title_strong:
         return _categorize(title_l)
     if _SALES_TERMS.search(title_l) and _MARKETS_ANCHOR.search(title_l):
         return "sales"
@@ -602,4 +641,59 @@ def extract_duration(title: str, description: str = "") -> Optional[str]:
             unit = _DURATION_WORDS.get(m.group(2).lower(), "months")
             if (unit == "months" and 1 <= n <= 24) or (unit == "weeks" and 1 <= n <= 52):
                 return f"{n} {unit}"
+    return None
+
+
+_REL_DAYS_RE = re.compile(r"(\d+)\s*\+?\s*day", re.I)
+_TZ_OFFSET_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def parse_posted_date(raw) -> Optional[datetime]:
+    """Parse a bank's posting date (when the role went live on their site) into a
+    naive-UTC datetime. Handles ISO strings, common date formats, epoch seconds/ms,
+    and Workday-style relative phrases ("Posted Today", "Posted 30+ Days Ago").
+    Returns None when it can't be parsed (the UI then falls back to first-seen)."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        ts = float(raw)
+        if ts > 1e12:      # milliseconds
+            ts /= 1000.0
+        if ts < 1e9 or ts > 4e9:  # sanity: ~2001..2096
+            return None
+        try:
+            return datetime.utcfromtimestamp(ts)
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    low = s.lower()
+    now = datetime.utcnow()
+    # Workday / relative phrasings
+    if "today" in low or "just posted" in low or low == "new":
+        return now
+    if "yesterday" in low:
+        return now - timedelta(days=1)
+    if ("ago" in low or "posted" in low) and "day" in low:
+        m = _REL_DAYS_RE.search(low)
+        if m:
+            return now - timedelta(days=min(int(m.group(1)), 3650))
+    # Absolute: ISO first (handles Z and +0000 → +00:00), then common formats.
+    iso = _TZ_OFFSET_RE.sub(r"\1:\2", s.replace("Z", "+00:00"))
+    # fromisoformat only accepts 3- or 6-digit fractional seconds; some APIs
+    # (Goldman) emit nanoseconds — truncate to microseconds.
+    iso = re.sub(r"\.(\d{6})\d+", r".\1", iso)
+    try:
+        dt = datetime.fromisoformat(iso)
+        return dt.replace(tzinfo=None) if dt.tzinfo is None else \
+            dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y", "%d.%m.%Y",
+                "%d-%m-%Y", "%B %d, %Y", "%d %B %Y", "%b %d, %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(s[:24].strip(), fmt)
+        except ValueError:
+            continue
     return None

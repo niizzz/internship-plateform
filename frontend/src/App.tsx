@@ -1,4 +1,6 @@
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { api } from './api'
 import OffersPage from './pages/OffersPage'
 import OfferDetailPage from './pages/OfferDetailPage'
 import SettingsPage from './pages/SettingsPage'
@@ -6,6 +8,7 @@ import ProfilePage from './pages/ProfilePage'
 import NotificationBell from './components/NotificationBell'
 import RefreshButton from './components/RefreshButton'
 import TailorProgress from './components/TailorProgress'
+import ActivityTicker from './components/ActivityTicker'
 
 const NAV = [
   { to: '/', label: 'Offers' },
@@ -44,12 +47,14 @@ export default function App() {
             </nav>
           </div>
           <div className="flex items-center gap-2">
+            <HeaderStats />
             <TailorProgress />
             <RefreshButton />
             <NotificationBell />
           </div>
         </div>
       </header>
+      <ActivityTicker />
       <main className="flex-1">
         <Routes>
           <Route path="/" element={<OffersPage />} />
@@ -64,6 +69,28 @@ export default function App() {
           <span className="text-slate-600">trading-floor mode</span>
         </div>
       </footer>
+    </div>
+  )
+}
+
+function HeaderStats() {
+  const { data } = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard, refetchInterval: 20_000 })
+  const streak = data?.funnel.streak_days ?? 0
+  const live = data?.pipeline.active_offers ?? 0
+  return (
+    <div className="hidden md:flex items-center gap-4 mr-1 pr-3 border-r border-ink-700 font-mono text-[11px]">
+      <div className="flex items-center gap-1.5">
+        <span className="text-slate-500 uppercase tracking-wider">Streak</span>
+        <span className="text-neon-green font-semibold tabular-nums">{streak}d</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-neon-cyan opacity-60" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-neon-cyan" />
+        </span>
+        <span className="text-slate-100 font-semibold tabular-nums">{live}</span>
+        <span className="text-slate-500 uppercase tracking-wider">live</span>
+      </div>
     </div>
   )
 }

@@ -77,6 +77,7 @@ class MorganStanleyScraper(BankScraper):
                         location=p.get("locationsText") or "",
                         apply_url=JOB_URL_TMPL.format(external_path=ext_path),
                         source_url=self.careers_url,
+                        posted_raw=p.get("postedOn"),  # relative; enrich overrides with absolute startDate
                         extras={"external_path": ext_path, "posted_on": p.get("postedOn")},
                     )
                 offset += PAGE_SIZE
@@ -109,7 +110,10 @@ class MorganStanleyScraper(BankScraper):
                         return
                     await asyncio.sleep(0.2)
                 jp = d.get("jobPostingInfo", {})
-                # Workday startDate is the posting date, not the job start — skip it.
+                # Workday startDate is the (absolute) posting date, not the job
+                # start — use it for posted_at; the real start comes from text.
+                if jp.get("startDate"):
+                    o.posted_raw = jp.get("startDate")
                 clean = html_to_text(jp.get("jobDescription") or "")
                 if clean:
                     o.description = clean
