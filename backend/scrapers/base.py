@@ -28,7 +28,10 @@ EUROPE_CITIES = {
     # DACH
     "frankfurt", "berlin", "munich", "münchen", "zurich", "zürich", "geneva", "genève", "basel", "lugano", "vienna", "wien",
     # Iberia
-    "madrid", "barcelona", "lisbon", "lisboa",
+    "madrid", "barcelona", "lisbon", "lisboa", "porto", "oporto",
+    # Santander's global HQ ("Ciudad Santander") and SCIB Madrid trading floor
+    # are posted as this suburb, never as "Madrid".
+    "boadilla del monte", "boadilla",
     # Benelux
     "amsterdam", "the hague", "rotterdam", "brussels", "bruxelles", "luxembourg", "luxembourg city",
     # Nordics
@@ -56,6 +59,7 @@ PROGRAM_KEYWORDS = [
     "off-cycle", "off cycle", "spring", "insight", "discovery",
     "graduate", "analyst program", "analyst programme", "early careers",
     "apprenticeship", "apprenti", "stagiaire", "stage", "vie",
+    "becario", "beca", "prácticas", "estágio", "estagiário",
 ]
 
 
@@ -189,8 +193,11 @@ _STRONG_SNT = re.compile(
     r"macro\s+(?:trad\w*|sales|strateg\w*|research|desk)|"
     r"securitized products|securitised products|asset[-\s]backed|"
     # Trading-style products
-    r"delta one|prime services|prime brokerage|"
+    # BofA calls its prime-brokerage desk "Prime Financing" (Global Equities).
+    r"delta one|prime\s+(?:services|brokerage|financ(?:e|ing))|"
     r"electronic trading|algorithmic trading|algo trading|low\s*latency|"
+    # e-trading execution desks (BNP "Automated Client Execution").
+    r"(?:automated\s+)?client execution|execution services|"
     r"market[-\s]?making|market maker|"
     r"qis|quantitative investment strateg|systematic trading|systematic strateg|"
     r"flow\s+(?:trad(?:er|ing)|sales|product)|"
@@ -210,7 +217,15 @@ _STRONG_SNT = re.compile(
     r"n[ée]gociateur|structureur|ing[ée]nieur\s+financier|"
     r"produits?\s+structur[ée]s?|structuration|"
     r"salle des march[ée]s|d[ée]riv[ée]s\s+actions|"
-    r"vente[s]?\s+(?:flux|d[ée]riv\w*|actions|taux|change|cr[ée]dit|march)"
+    r"vente[s]?\s+(?:flux|d[ée]riv\w*|actions|taux|change|cr[ée]dit|march)|"
+    # Spanish / Portuguese desk terms (Santander, BBVA). "sala de mercados" is
+    # the Iberian "salle des marchés" / trading floor. Bare "mercado(s)" is
+    # deliberately NOT here — "riesgos de mercado" is market RISK, not a desk.
+    r"sala de mercados|mercados\s+(?:globales|globais|financieros)|"
+    r"renta\s+(?:fija|variable)|renda\s+(?:fixa|vari[áa]vel)|"
+    r"productos?\s+estructurados?|produtos?\s+estruturados?|"
+    r"derivados\s+(?:de\s+)?(?:acciones|ac[çc][õo]es|renta|cr[ée]dito)|"
+    r"mesa\s+de\s+(?:negociaci[óo]n|tesorer[íi]a|trading)"
     r")\b"
 )
 
@@ -229,13 +244,19 @@ _VERY_STRONG_SNT = re.compile(
     r"credit\s+(?:trading|sales|flow)|"
     r"commodit(?:y|ies)\s+(?:trading|sales)|"
     r"macro\s+(?:trading|sales|desk)|"
-    r"delta one|prime (?:brokerage|services)|"
+    r"delta one|prime\s+(?:brokerage|services|financ(?:e|ing))|"
     r"electronic trading|algorithmic trading|algo trading|market[-\s]?making|"
+    r"(?:automated\s+)?client execution|execution services|"
     r"structured\s+(?:products?|notes?|solutions?|derivatives)|"
     r"flow\s+(?:trading|sales)|sales[\s-]*trader|securities lending|"
     # French desk terms
     r"n[ée]gociateur|structureur|produits?\s+structur[ée]s?|"
-    r"salle des march[ée]s|d[ée]riv[ée]s\s+actions"
+    r"salle des march[ée]s|d[ée]riv[ée]s\s+actions|"
+    # Spanish / Portuguese desk terms — see _STRONG_SNT.
+    r"sala de mercados|mercados\s+(?:globales|globais)|"
+    r"renta\s+(?:fija|variable)|renda\s+(?:fixa|vari[áa]vel)|"
+    r"productos?\s+estructurados?|produtos?\s+estruturados?|"
+    r"mesa\s+de\s+(?:negociaci[óo]n|trading)"
     r")\b"
 )
 
@@ -266,6 +287,18 @@ _HARD_NON_FO = re.compile(
     r"esg|sustainability|regulatory|governance|onboarding)\b"
 )
 
+# Functions that name the desk they SUPPORT rather than a seat on it, so they
+# must beat even a strong S&T marker. "Head of Early Careers Global Markets
+# Recruiting" carries "global markets" and so sailed through the banking-only
+# gate (which a strong title marker bypasses) into the feed as an S&T role.
+# Keep this list to titles that are never, under any bank's naming, a desk seat.
+# "Global Markets Chief Operating Office Summer Analyst" (BofA) is the same
+# shape: the COO function runs the division's business management, not a desk.
+_NEVER_SNT_TITLE = re.compile(
+    r"\b(recruit(?:ing|ment|er|ers)?|talent acquisition|resourcing|"
+    r"chief operating office(?:r)?|coo)\b"
+)
+
 # Sales-adjacent terms that need a markets context anchor to count.
 _SALES_TERMS = re.compile(r"\b(sales|distribution|client coverage|institutional sales)\b")
 _MARKETS_ANCHOR = re.compile(
@@ -283,6 +316,11 @@ def _categorize(text: str) -> str:
     if re.search(r"\bn[ée]gociateur\b", text):
         return "trading"
     if re.search(r"\bvente[s]?\b", text) and not re.search(r"\btrad", text):
+        return "sales"
+    # Spanish / Portuguese: ventas / vendas = sales, mesa de negociación = trading.
+    if re.search(r"\bmesa\s+de\s+(?:negociaci[óo]n|trading)\b", text):
+        return "trading"
+    if re.search(r"\b(ventas|vendas)\b", text) and not re.search(r"\btrad", text):
         return "sales"
     if re.search(r"\btrad(er|ing)\b", text):
         return "trading"
@@ -305,6 +343,11 @@ def is_snt_role(title: str, description: str = "") -> Optional[str]:
          does not qualify. This is what keeps coverage/lending interns out.
     """
     title_l = title.lower()
+
+    # Recruiting/HR titles name the desk they hire for, never a seat on it, so
+    # this beats the strong-marker override below.
+    if _NEVER_SNT_TITLE.search(title_l):
+        return None
 
     # A strong S&T title marker OR a delimited "- Markets" division segment
     # overrides the banking-only gate. The "- Markets" rescue is suppressed when
@@ -375,7 +418,14 @@ _PROGRAM_RE = re.compile(
     r"tirocin(?:io|ante|i)|"
     # German early-careers terms (Deutsche Bank, German postings)
     r"praktikum|praktikant(?:in)?|werkstudent(?:in)?|working\s+student|"
+    # Spanish (Santander, BBVA post their Madrid roles in Spanish).
+    r"becari[oa]s?|becas?|pr[áa]cticas?|"
+    # Portuguese (Santander Totta posts Lisboa/Porto roles in Portuguese).
+    r"est[áa]gios?|estagi[áa]ri[oa]s?|"
     r"early\s+careers?|emerging\s+talent|"
+    # Banks label some early-careers programmes "Academy" with no other
+    # program word (BNP "2027 Women in Trading Academy - Global Markets").
+    r"academy|"
     r"work\s+(?:placement|experience)"
     r")\b"
 )
@@ -393,15 +443,30 @@ def is_internship_or_grad(title: str, description: str = "") -> bool:
     return bool(_PROGRAM_RE.search(title.lower()))
 
 
+# Non-European places whose names contain a European city as a whole word.
+# Word boundaries alone do not exclude these — the longer name must be tested
+# first and rejected.
+_NON_EUROPE_TRAPS = re.compile(
+    r"(?<![a-zà-ÿ])porto\s+(?:alegre|velho|seguro)(?![a-zà-ÿ])"
+)
+
+
 def parse_location(raw: str) -> tuple[Optional[str], Optional[str]]:
     """Return (city, country) best-effort from a free-form location string.
 
     Matches are whole-word: bare substring matching classified "Ukraine" (and
     even "Fukuoka") as the UK, and "Jerome St" as Rome.
+
+    Some non-European cities are whole-word *compounds* of a European one, so
+    the word-boundary rule alone does not stop them (Santander Brasil posts
+    hundreds of "Porto Alegre" roles that would otherwise read as Portugal).
+    Those are rejected outright before any city match.
     """
     if not raw:
         return None, None
     text = raw.lower()
+    if _NON_EUROPE_TRAPS.search(text):
+        return None, None
     city = None
     for c in EUROPE_CITIES:
         if re.search(r"(?<![a-zà-ÿ])" + re.escape(c) + r"(?![a-zà-ÿ])", text):
@@ -425,6 +490,8 @@ def parse_location(raw: str) -> tuple[Optional[str], Optional[str]]:
             "Frankfurt": "Germany", "Berlin": "Germany", "Munich": "Germany", "München": "Germany",
             "Zurich": "Switzerland", "Zürich": "Switzerland", "Geneva": "Switzerland", "Basel": "Switzerland",
             "Madrid": "Spain", "Barcelona": "Spain",
+            "Boadilla Del Monte": "Spain", "Boadilla": "Spain",
+            "Porto": "Portugal", "Oporto": "Portugal",
             "Milan": "Italy", "Milano": "Italy", "Rome": "Italy",
             "Amsterdam": "Netherlands", "Rotterdam": "Netherlands",
             "Brussels": "Belgium", "Bruxelles": "Belgium",
@@ -446,6 +513,23 @@ def in_europe(location: str) -> bool:
         return False
     city, country = parse_location(location)
     return city is not None or country is not None
+
+
+# --- Lumesse tal.net detail pages -------------------------------------------
+
+# Label → value blocks on a tal.net vacancy page (Nomura, BofA campus). The
+# value div follows its label within the same form-group; the description
+# ("Job description" / "Program description") is the last and largest field.
+_TALNET_FIELD_RE = re.compile(
+    r'hform_lbl_text[^>]*>\s*(?P<label>[^<]+?)\s*<.*?form-control-static[^>]*>(?P<value>.*?)</div>\s*</div>',
+    re.DOTALL,
+)
+
+
+def talnet_detail_fields(html: str) -> dict[str, str]:
+    """Return {lower-cased label: raw HTML value} for a tal.net vacancy page."""
+    return {m.group("label").strip().lower(): m.group("value")
+            for m in _TALNET_FIELD_RE.finditer(html)}
 
 
 # --- Description formatting --------------------------------------------------
@@ -549,7 +633,7 @@ _TRAILING_START_RE = re.compile(
 # Seasons: "Summer 2027", "2027 Summer Analyst", "été 2026",
 # "Summer Analyst Program 2027" (program words between season and year).
 _SEASON_RE = re.compile(
-    r"\b(summer|spring|autumn|fall|winter|[ée]t[ée]|printemps)"
+    r"\b(summer|spring|autumn|fall|winter|off[\s-]?cycle|[ée]t[ée]|printemps)"
     r"(?:\s+(?:analyst|associate|intern(?:ship)?|week|programme|program))*\s+(20\d\d)\b|"
     r"\b(20\d\d)\s+(summer|spring|off[\s-]?cycle|winter)\b", re.I)
 _SEASON_MONTH = {"summer": 6, "été": 6, "ete": 6, "spring": 4, "printemps": 4,

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
-import { api } from '../api'
+import { api, Automation, AutomationUpdate } from '../api'
 
 export default function SettingsPage() {
   const qc = useQueryClient()
@@ -34,7 +34,9 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
-      <PageHeader title="Settings" subtitle="Document engine, base CV & cover letter" />
+      <PageHeader title="Settings" subtitle="Automation, document engine, base CV & cover letter" />
+
+      <AutomationCard />
 
       <Card title="Document engine — Claude Code CLI">
         <div className="text-sm mb-1">
@@ -164,4 +166,115 @@ function FileRow({ file, setFile, onUpload, uploading, accept = '.pdf,.docx' }: 
       </button>
     </div>
   )
+}
+
+function fmtWhen(iso: string | null): string {
+  if (!iso) return '—'
+  return new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).toLocaleString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+function AutomationCard() {
+  const qc = useQueryClient()
+  const { data: a } = useQuery({ queryKey: ['automation'], queryFn: api.getAutomation, refetchInterval: 60_000 })
+  const [draft, setDraft] = useState<AutomationUpdate>({})
+  const [pwd, setPwd] = useState('')
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const save = useMutation({
+    mutationFn: (body: AutomationUpdate) => api.updateAutomation(body),
+    onSuccess: (res: Automation) => {
+      qc.setQueryData(['automation'], res); setDraft({}); setPwd('')
+      setMsg({ ok: true, text: 'Saved.' })
+    },
+    onError: (e: any) => setMsg({ ok: false, text: String(e.message ?? e) }),
+  })
+  const test = useMutation({
+    mutationFn: api.testEmail,
+    onSuccess: () => { setMsg({ ok: true, text: `Test email sent to ${a?.notify_email}. Check that inbox (and spam).` }); qc.invalidateQueries({ queryKey: ['automation'] }) },
+    onError: (e: any) => {
+      const raw = String(e.message ?? e)
+      const m = raw.match(/"detail":"(.*)"/)
+      setMsg({ ok: false, text: m ? m[1] : raw })
+    },
+  })
+
+  if (!a) return <Card title="Automation"><div className="text-sm text-slate-500">Loading…</div></Card>
+  const v = <K extends keyof AutomationUpdate>(k: K) => (k in draft ? draft[k] : (a as any)[k]) as AutomationUpdate[K]
+  const set = (k: keyof AutomationUpdate, val: any) => setDraft(d => ({ ...d, [k]: val }))
+  const dirty = Object.keys(draft).length > 0 || pwd !== ''
+
+  return (
+    <Card title="Automation — daily refresh & email alerts">
+      <label className="flex items-center gap-3 text-sm text-slate-200">
+        <input type="checkbox" checked={!!v('auto_refresh')}
+          onChange={e => save.mutate({ auto_refresh: e.target.checked })} />
+        Refresh offers + events automatically every
+        <input type="number" min={1} max={168} value={v('auto_refresh_hours') ?? 24}
+          onChange={e => set('auto_refresh_hours', Number(e.target.value))}
+          className={inp + ' w-16 py-1'} /> hours
+      </label>
+      <div className="mt-1 ml-6 text-xs text-slate-500 font-mono">
+        last: {fmtWhen(a.last_refresh_at)} · next: {a.auto_refresh ? fmtWhen(a.next_refresh_at) : 'off'}
+      </div>
+      <Hint>
+        Runs while the platform is open (the backend window). If the PC was off, it catches up within ~10 minutes of launching.
+      </Hint>
+
+      <div className="mt-5 pt-4 border-t border-ink-700 space-y-3">
+        <label className="flex items-center gap-3 text-sm text-slate-200">
+          <input type="checkbox" checked={!!v('email_notifications')}
+            onChange={e => set('email_notifications', e.target.checked)} />
+          Email me when a refresh finds new offers or events
+        </label>
+        <div className="grid sm:grid-cols-2 gap-2">
+          <Field label="Send alerts to">
+            <input className={inp} type="email" value={v('notify_email') ?? ''}
+              onChange={e => set('notify_email', e.target.value)} placeholder="you@school.edu" />
+          </Field>
+          <Field label="Send from (Gmail address)">
+            <input className={inp} type="email" value={v('smtp_user') ?? ''}
+              onChange={e => set('smtp_user', e.target.value)} placeholder="you@gmail.com" />
+          </Field>
+          <Field label={`Gmail app password ${a.has_smtp_password ? '(saved, type to replace)' : ''}`}>
+            <input className={inp} type="password" value={pwd} autoComplete="new-password"
+              onChange={e => setPwd(e.target.value)} placeholder={a.has_smtp_password ? '••••••••••••••••' : '16-character app password'} />
+          </Field>
+          <Field label="SMTP server : port">
+            <div className="flex gap-2">
+              <input className={inp + ' flex-1'} value={v('smtp_host') ?? ''} onChange={e => set('smtp_host', e.target.value)} />
+              <input className={inp + ' w-20'} type="number" value={v('smtp_port') ?? 465} onChange={e => set('smtp_port', Number(e.target.value))} />
+            </div>
+          </Field>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className={btnPrimary} disabled={!dirty || save.isPending}
+            onClick={() => save.mutate({ ...draft, ...(pwd ? { smtp_password: pwd } : {}) })}>
+            {save.isPending ? 'Saving…' : 'Save'}
+          </button>
+          <button disabled={!a.email_status.configured || test.isPending || dirty} onClick={() => test.mutate()}
+            title={dirty ? 'Save first' : ''}
+            className="px-3 py-2 rounded-md border border-ink-600 text-sm text-slate-200 hover:border-neon-cyan/60 disabled:opacity-40">
+            {test.isPending ? 'Sending…' : 'Send test email'}
+          </button>
+          {a.email_status.at && (
+            <span className={`text-xs font-mono ${a.email_status.ok ? 'text-neon-green' : 'text-rose-300'}`}>
+              last email {fmtWhen(a.email_status.at)}: {a.email_status.detail}
+            </span>
+          )}
+        </div>
+        {msg && <div className={`text-xs ${msg.ok ? 'text-neon-green' : 'text-rose-300'}`}>{msg.text}</div>}
+        <Hint>
+          One digest per refresh, only for items that are new since you switched this on, and only events with open
+          registration in Markets or firm-wide. Gmail needs an <b>App Password</b> (Google Account → Security →
+          2-Step Verification → App passwords), not your normal password. It is stored only in the local database.
+        </Hint>
+      </div>
+    </Card>
+  )
+}
+
+function Field({ label, children }: { label: string; children: any }) {
+  return <label className="flex flex-col gap-1 text-xs text-slate-500">{label}{children}</label>
 }

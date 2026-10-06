@@ -60,8 +60,15 @@ def main() -> int:
     check("seed: 3 active", active_ids(eng, "X") == {"1", "2", "3"})
 
     # A successful-but-empty scrape must NOT wipe a bank on the first zero.
-    orch.persist([], {"X"})
+    res = orch.persist([], {"X"})
     check("first zero-yield does not deactivate", active_ids(eng, "X") == {"1", "2", "3"})
+
+    # The hold must also explain itself: the UI health badge shows this reason
+    # on hover, so a held bank is diagnosable without opening the backend log.
+    det = res.get("suspect_detail") or []
+    check("zero-yield hold reports a reason",
+          len(det) == 1 and det[0]["bank"] == "X"
+          and "0 offers" in det[0]["reason"] and "1/2" in det[0]["reason"])
 
     # A second consecutive zero-yield is trusted (bank really has nothing).
     orch.persist([], {"X"})

@@ -21,36 +21,38 @@ CSS = f"""
   html, body {{ margin: 0; padding: 0; }}
   .cv {{
     font-family: 'Times New Roman', Times, serif;
-    color: #000; font-size: 9.6pt; line-height: 1.12;
+    color: #000; font-size: 9pt; line-height: 1.33;
   }}
   .name {{
-    text-align: center; font-weight: bold; font-size: 16pt;
+    text-align: center; font-weight: bold; font-size: 14pt;
     letter-spacing: .3px; margin: 0;
   }}
-  .contact {{ text-align: center; font-size: 9.3pt; margin-top: 1pt; }}
+  .contact {{ text-align: center; font-size: 9pt; margin-top: 1pt; }}
   .contact a {{ color: #000; text-decoration: underline; }}
   .sep {{ display: inline-block; padding: 0 3pt; }}
 
   .section {{ margin-top: 5pt; }}
   .heading {{
-    color: {NAVY}; font-weight: bold; font-size: 10.5pt; text-transform: uppercase;
+    color: {NAVY}; font-weight: bold; font-size: 10pt; text-transform: uppercase;
     letter-spacing: .3px; border-bottom: 1.2pt solid {NAVY};
-    padding-bottom: .5pt; margin-bottom: 2.5pt;
+    padding-bottom: .5pt; margin-bottom: 4.5pt;
   }}
 
-  .entry {{ margin-bottom: 3.5pt; }}
+  .entry {{ margin-bottom: 4.5pt; }}
   .entry:last-child {{ margin-bottom: 0; }}
   .entry-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10pt; }}
-  .entry-head .left {{ font-weight: bold; font-size: 9.6pt; }}
-  .entry-head .right {{ font-style: italic; font-size: 9.3pt; white-space: nowrap; flex-shrink: 0; }}
-  .subtitle {{ font-style: italic; font-size: 9.3pt; margin-top: .3pt; }}
-  .sub {{ font-size: 9.3pt; margin-top: .3pt; }}
+  .entry-head .left {{ font-weight: bold; font-size: 9pt; }}
+  /* `pre` (not `nowrap`) so the source's double spaces around the "|" survive
+     HTML whitespace collapsing; it still never wraps. */
+  .entry-head .right {{ font-style: italic; font-size: 9pt; white-space: pre; flex-shrink: 0; }}
+  .subtitle {{ font-style: italic; font-size: 9pt; margin-top: .3pt; }}
+  .sub {{ font-size: 9pt; margin-top: .3pt; }}
 
   ul {{ margin: 1pt 0 0 0; padding-left: 14pt; }}
-  li {{ font-size: 9.3pt; margin-bottom: .6pt; }}
+  li {{ font-size: 9pt; margin-bottom: .6pt; }}
 
-  .profile-text {{ font-size: 9.3pt; margin: 0; }}
-  .kv {{ font-size: 9.3pt; margin-bottom: 1pt; }}
+  .profile-text {{ font-size: 9pt; margin: 0; }}
+  .kv {{ font-size: 9pt; margin-bottom: 1pt; white-space: pre-wrap; }}
   .kv:last-child {{ margin-bottom: 0; }}
   .kv-label {{ font-weight: bold; }}
 """
@@ -128,7 +130,10 @@ def render_html(cv: dict, fs: float = 1.0) -> str:
     )
 
 
-_MARGIN = {"top": "0.45in", "bottom": "0.35in", "left": "0.5in", "right": "0.5in"}
+# Matched to the user's own base CV (measured on the source PDF: text starts at
+# 21.6pt from the left, ends 18.9pt from the right, top 23.1pt). The old
+# half-inch margins were the main reason the rendered CV looked sparse.
+_MARGIN = {"top": "0.3in", "bottom": "0.3in", "left": "0.3in", "right": "0.26in"}
 
 
 def _expected_li(cv: dict) -> int:
@@ -179,17 +184,20 @@ def render_cv_pdf(cv: dict, out_pdf: Path) -> Path:
     """Render structured CV data to a one-page PDF via headless Chromium (sync
     Playwright, safe to call from a worker thread).
 
-    Auto-fit shrinks the FONT (page width fixed) in small steps until the CV both
-    (a) fits one page and (b) has no experience/interest bullet wrapping onto a
-    second line. Font-scaling — not CSS zoom — is what reduces wrapping, because
-    zoom scales the page width along with the text and so leaves the wrap point
-    unchanged."""
+    Auto-fit shrinks the FONT (page width fixed) in small steps only when the CV
+    spills onto a second page. Font-scaling — not CSS zoom — is what reduces
+    wrapping, because zoom scales the page width along with the text and so
+    leaves the wrap point unchanged.
+
+    NB it deliberately no longer shrinks to force one-line bullets. The user's own
+    base CV wraps several bullets and fills the page; shrinking to unwrap them was
+    what left ~240pt of dead space at the bottom. `_bullet_wrap_count` is kept for
+    diagnostics."""
     from playwright.sync_api import sync_playwright
     from pypdf import PdfReader
 
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    expected_li = _expected_li(cv)
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         try:
@@ -200,10 +208,7 @@ def render_cv_pdf(cv: dict, out_pdf: Path) -> Path:
                 page.pdf(path=str(out_pdf), format="A4", print_background=True,
                          prefer_css_page_size=False, margin=_MARGIN)
                 pages = len(PdfReader(str(out_pdf)).pages)
-                # Only bother measuring wraps once it fits one page; a 2-page
-                # layout is shrunk regardless.
-                wraps = _bullet_wrap_count(out_pdf, expected_li) if pages <= 1 else 1
-                if pages <= 1 and wraps == 0:
+                if pages <= 1:
                     break
                 fs -= 0.03
                 if fs < 0.80:  # readability floor (~7.5pt body); bounded

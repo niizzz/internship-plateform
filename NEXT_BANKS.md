@@ -8,7 +8,7 @@ per-bank plan. Do the work from `backend/` with `.venv/Scripts/python.exe`.
 
 | Bank | State | Work needed |
 |---|---|---|
-| Deutsche Bank | **LIVE** (`scrapers/deutschebank.py`, BeeSite JSON) | Verify + optional DE-language sweep (§3) |
+| Deutsche Bank | **LIVE** (`scrapers/deutschebank.py`, BeeSite JSON x2) | DONE 2026-09-01 — added the `/graduatesearch/` board (§3) |
 | Rothschild & Co | **LIVE** (`scrapers/rothschild.py`, Workday CXS) | Verify only (§4) |
 | HSBC | LIVE but **points at the wrong board** (GSC/experienced) | Re-point to the student Avature board (§2) — the main job |
 | UniCredit | **NOT implemented** (probes from agents got conn-refused/geo-blocked; a real browser on this machine should get through) | Discover ATS, then implement (§5) |
@@ -98,19 +98,45 @@ Procedure:
    in August is "list request returns 200 with a well-formed (possibly empty)
    result set and zero GSC pollution", plus a re-run in September.
 
-## 3. Deutsche Bank — already live; verify, then close the German gap
+## 3. Deutsche Bank — DONE (2026-09-01): the early-careers board was missing
 
-`deutschebank.py` paginates the full BeeSite EN index and enriches
-program-matching titles. Verify with `debug_bank.py deutschebank
-DeutscheBankScraper` (expect raw > 0 always — DB lists hundreds of EU roles).
+**Resolved.** DB runs **two separate BeeSite indexes**, and `deutschebank.py`
+only ever swept the first:
 
-Known improvement worth doing: the search payload sends
-`"LanguageCode": "EN"`. German-only postings (Praktikum/Werkstudent in
-Frankfurt) may exist only under `DE`. Add a second sweep with
-`LanguageCode: "DE"`, merge by `PositionID` (dict dedupe — the id is
-language-independent), keep the EN title when both exist. The filter already
-understands praktikum/werkstudent. Measure before/after with the harness; if
-the DE sweep adds zero rows, drop it and note that in the module docstring.
+| index | URL | content |
+|---|---|---|
+| main | `api-deutschebank.beesite.de/search/` | ~1900 professional/experienced reqs |
+| graduate | `api-deutschebank.beesite.de/graduatesearch/` | ~70 student reqs — **every** Internship Programme / Graduate Programme / Praktikum |
+
+The graduate board is a *different index*, not a facet on the main one, so no
+filter on `/search/` could ever have reached it. Consequence: the platform saw
+**zero** DB early-careers S&T roles for as long as the scraper existed. Found by
+watching the network calls behind
+`careers.db.com/students-graduates/search-programmes` (the SPA fetches
+`/graduatesearch/`).
+
+`scrape()` now sweeps both via `_sweep()`, deduping on `PositionID`. Result:
+raw 1339 → 1379 EU, internship titles 15 → 50, **kept S&T 0 → 6** (London
+Quantitative FIC + QRD Lab Sales and Trading 2027, Frankfurt Global Markets
+internship + graduate programme 2027, plus the 2026 pair).
+
+**TRAP — `LanguageCode` must be uppercase `"EN"` on `/graduatesearch/`.**
+Lowercase `"en"` (what DB's own SPA sends) returns **German country names**
+("Grossbritannien und Nordirland", "Deutschland"), which silently fail the
+English `EUROPE_COUNTRIES` check and drop every European role. Uppercase `"EN"`
+returns "United Kingdom"/"Germany". Both spellings return the same 69 rows, so
+the bug is invisible in the row count — only the Europe filter output changes.
+
+Also fixed while in here: `_collect` now sets `posted_raw` from
+`PublicationStartDate` (DB previously had no `posted_at` at all), and uses
+`PositionURI` as `apply_url` when it is absolute — the graduate board returns a
+real `db.recsolu.com/external/requisitions/<token>` apply link, whereas the main
+board returns only a relative `/index.php?ac=jobad&id=N` (so `APPLY_TMPL` still
+applies there).
+
+The old German-sweep idea stays **rejected**: an EN vs DE sweep of `/search/`
+returned identical PositionID sets (1802 vs 1802). The missing German
+Praktika were on the graduate board all along, not behind a language code.
 
 ## 4. Rothschild & Co — already live; verify only
 

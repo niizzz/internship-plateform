@@ -19,7 +19,7 @@ import re
 
 import httpx
 
-from .base import BankScraper, ScrapedOffer, html_to_text
+from .base import BankScraper, ScrapedOffer, html_to_text, talnet_detail_fields
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,6 @@ _TILE_RE = re.compile(
 _HREF_RE = re.compile(r'<a class="subject" href="([^"]+)"')
 _LOCATION_RE = re.compile(r'Location:</span>\s*([^<]+)')
 _DEADLINE_RE = re.compile(r'Application Deadline:</span>\s*([^<]+)')
-
-# Detail page: label → value blocks. The value div follows its label within the
-# same form-group; "Job description" is the last (and largest) field.
-_FIELD_RE = re.compile(
-    r'hform_lbl_text[^>]*>\s*(?P<label>[^<]+?)\s*<.*?form-control-static[^>]*>(?P<value>.*?)</div>\s*</div>',
-    re.DOTALL,
-)
 
 
 class NomuraScraper(BankScraper):
@@ -99,9 +92,7 @@ class NomuraScraper(BankScraper):
                     r = await client.get(o.apply_url)
                     if r.status_code != 200:
                         return
-                    fields = {}
-                    for fm in _FIELD_RE.finditer(r.text):
-                        fields[fm.group("label").strip().lower()] = fm.group("value")
+                    fields = talnet_detail_fields(r.text)
                 except Exception:
                     return
             desc = html_to_text(fields.get("job description") or "")

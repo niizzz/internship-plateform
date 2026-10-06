@@ -11,3 +11,4 @@ pdf2docx
 httpx
 pydantic-settings
 pywin32
+tzdata>=2024.1

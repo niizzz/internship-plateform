@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 # Playwright needs subprocess support; on Windows we must use ProactorEventLoop.
 if sys.platform == "win32":
@@ -17,20 +18,24 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Bac
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, or_
 
 from db import (
     ENGINE, init_db, get_session,
     Offer, Application, ApplicationStatus,
     TailoredDocument, DocumentKind,
-    Notification, Settings,
+    Notification, Settings, ApplicationEvent,
+    RecruitingEvent, EventRegStatus,
 )
 from scrapers import ALL_SCRAPERS
 from scrapers.registry import build_scrapers
 from scrapers.orchestrator import refresh_all
+from scrapers.events import refresh_events, classify_relevance, classify_type
+import notifier
 from cv_utils import ensure_docx, full_text
 from cv_render import render_cv_pdf, render_cover_letter_pdf, flatten_cv_text
 from llm import tailor_cv_json, generate_cover_letter, ClaudeCliError, is_usage_limit_error
+from outreach_api import router as outreach_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 # Persist logs: the console lives in a minimized launcher window and every
@@ -67,9 +72,13 @@ app.add_middleware(
 )
 
 
+app.include_router(outreach_router)
+
+
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     init_db()
+    app.state.auto_refresh_task = asyncio.create_task(_auto_refresh_loop())
 
 
 # ---------- Schemas ---------------------------------------------------------
@@ -83,6 +92,7 @@ class OfferOut(BaseModel):
     country: str
     city: Optional[str]
     start_date_raw: Optional[str]
+    start_year: Optional[int]
     duration: Optional[str]
     program_type: str
     description: Optional[str]
@@ -117,6 +127,7 @@ def _offer_to_out(
         country=o.country,
         city=o.city,
         start_date_raw=o.start_date_raw,
+        start_year=_offer_start_year(o),
         duration=o.duration,
         program_type=o.program_type.value,
         description=o.description,
@@ -205,6 +216,38 @@ class RefreshStatus(BaseModel):
 
 # ---------- Offers ----------------------------------------------------------
 
+# Fields a free-text search looks at. Titles and locations alone were far too
+# narrow: the bank name and the start date were invisible to search, so
+# "goldman" or "January 2027" matched nothing at all.
+_SEARCH_FIELDS = (
+    Offer.role_title, Offer.bank, Offer.location, Offer.city, Offer.country,
+    Offer.start_date_raw, Offer.duration, Offer.program_type, Offer.description,
+)
+
+_YEAR_RE = re.compile(r"\b(20[2-3]\d)\b")
+
+
+def _offer_start_year(o: Offer) -> Optional[int]:
+    """Best-effort year the programme STARTS in, or None if unknowable.
+
+    start_date_parsed is only set when a month could be pinned down, which
+    leaves most postings without one. A bare programme year is still a solid
+    signal though ("2027 | EMEA | London | ... | Summer Analyst"), so fall back
+    to a year mentioned in the raw start date, then in the title. Descriptions
+    are deliberately NOT searched here: they name too many unrelated years
+    (deadlines, "founded in", prior programmes) to be trustworthy.
+    """
+    if o.start_date_parsed:
+        return o.start_date_parsed.year
+    for text in (o.start_date_raw, o.role_title):
+        if text:
+            m = _YEAR_RE.search(text)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+
 @app.get("/api/offers", response_model=list[OfferOut])
 def list_offers(
     bank: Optional[str] = None,
@@ -212,6 +255,7 @@ def list_offers(
     country: Optional[str] = None,
     status: Optional[ApplicationStatus] = None,
     search: Optional[str] = None,
+    start_year: Optional[int] = None,
     include_inactive: bool = False,
     session: Session = Depends(get_session),
 ):
@@ -225,10 +269,18 @@ def list_offers(
     if country:
         q = q.where(Offer.country == country)
     if search:
-        like = f"%{search.lower()}%"
-        q = q.where(func.lower(Offer.role_title).like(like) | func.lower(Offer.location).like(like))
+        # Every whitespace-separated token must appear in SOME searchable field
+        # (AND across tokens, OR across fields). This is what makes multi-word
+        # queries like "summer 2027" or "goldman london" work — a single LIKE
+        # over the whole phrase only ever matched one contiguous run of text in
+        # one field, so anything mixing two facts returned nothing.
+        for token in search.lower().split():
+            like = f"%{token}%"
+            q = q.where(or_(*[func.lower(f).like(like) for f in _SEARCH_FIELDS]))
     q = q.order_by(Offer.last_seen_at.desc())
     offers = session.exec(q).all()
+    if start_year is not None:
+        offers = [o for o in offers if _offer_start_year(o) == start_year]
 
     # Bulk-fetch applications and tailored docs (2 queries instead of 2 per offer).
     apps = {a.offer_id: a for a in session.exec(select(Application)).all()}
@@ -263,6 +315,7 @@ def update_application(offer_id: int, update: ApplicationUpdate, session: Sessio
         app_row = Application(offer_id=offer_id)
         session.add(app_row)
     if update.status is not None:
+        previous = app_row.status
         app_row.status = update.status
         if update.status == ApplicationStatus.not_applied:
             # Reverting to not-applied must clear the timestamp, or a later
@@ -270,6 +323,11 @@ def update_application(offer_id: int, update: ApplicationUpdate, session: Sessio
             app_row.applied_at = None
         elif app_row.applied_at is None:
             app_row.applied_at = datetime.utcnow()
+        # Append-only timeline for the pipeline view. Only real transitions are
+        # recorded — re-clicking the current status must not pad the history.
+        if previous != update.status:
+            session.add(ApplicationEvent(
+                offer_id=offer_id, from_status=previous, to_status=update.status))
     if update.notes is not None:
         app_row.notes = update.notes
     app_row.updated_at = datetime.utcnow()
@@ -277,6 +335,126 @@ def update_application(offer_id: int, update: ApplicationUpdate, session: Sessio
     session.commit()
     session.refresh(o)
     return _offer_to_out(session, o)
+
+
+# ---------- Pipeline (application tracker) ----------------------------------
+
+class PipelineEventOut(BaseModel):
+    from_status: Optional[str]
+    to_status: str
+    at: datetime
+
+
+class PipelineRowOut(BaseModel):
+    offer_id: int
+    bank: str
+    role_title: str
+    location: str
+    country: str
+    category: str
+    program_type: str
+    apply_url: str
+    start_date_raw: Optional[str]
+    start_year: Optional[int]
+    is_active: bool
+    status: str
+    notes: Optional[str]
+    applied_at: Optional[datetime]
+    updated_at: datetime
+    days_since_applied: Optional[int]
+    days_in_stage: Optional[int]
+    has_tailored_cv: bool
+    has_tailored_cover_letter: bool
+    events: list[PipelineEventOut]
+
+
+class PipelineOut(BaseModel):
+    rows: list[PipelineRowOut]
+    by_status: dict[str, int]
+    total: int
+    stalest_days: Optional[int]
+
+
+def _days_since(then: Optional[datetime]) -> Optional[int]:
+    if not then:
+        return None
+    return max(0, (datetime.utcnow() - then).days)
+
+
+@app.get("/api/pipeline", response_model=PipelineOut)
+def pipeline(
+    status: Optional[ApplicationStatus] = None,
+    include_not_applied: bool = False,
+    session: Session = Depends(get_session),
+):
+    """Every offer you have actually applied to, with its stage timeline.
+
+    Offers that were later taken down still appear (flagged is_active=False):
+    an application you sent is history, and hiding it would silently shrink
+    your own funnel.
+    """
+    apps = session.exec(select(Application)).all()
+    if not include_not_applied:
+        apps = [a for a in apps if a.status != ApplicationStatus.not_applied]
+    if status is not None:
+        apps = [a for a in apps if a.status == status]
+    if not apps:
+        return PipelineOut(rows=[], by_status={}, total=0, stalest_days=None)
+
+    offer_ids = {a.offer_id for a in apps}
+    offers = {o.id: o for o in session.exec(select(Offer).where(Offer.id.in_(offer_ids))).all()}
+
+    events_by_offer: dict[int, list[ApplicationEvent]] = {}
+    for e in session.exec(
+        select(ApplicationEvent).where(ApplicationEvent.offer_id.in_(offer_ids))
+        .order_by(ApplicationEvent.at)
+    ).all():
+        events_by_offer.setdefault(e.offer_id, []).append(e)
+
+    docs_by_offer: dict[int, list[TailoredDocument]] = {}
+    for d in session.exec(
+        select(TailoredDocument).where(TailoredDocument.offer_id.in_(offer_ids))
+    ).all():
+        docs_by_offer.setdefault(d.offer_id, []).append(d)
+
+    rows: list[PipelineRowOut] = []
+    for a in apps:
+        o = offers.get(a.offer_id)
+        if not o:  # orphaned application row; nothing to show
+            continue
+        evs = events_by_offer.get(a.offer_id, [])
+        docs = docs_by_offer.get(a.offer_id, [])
+        # Time in the current stage comes from the last transition INTO it —
+        # updated_at moves on every notes edit and would reset the clock.
+        entered = evs[-1].at if evs else a.applied_at
+        rows.append(PipelineRowOut(
+            offer_id=o.id, bank=o.bank, role_title=o.role_title,
+            location=o.location, country=o.country, category=o.category.value,
+            program_type=o.program_type.value, apply_url=o.apply_url,
+            start_date_raw=o.start_date_raw, start_year=_offer_start_year(o),
+            is_active=o.is_active,
+            status=a.status.value, notes=a.notes,
+            applied_at=a.applied_at, updated_at=a.updated_at,
+            days_since_applied=_days_since(a.applied_at),
+            days_in_stage=_days_since(entered),
+            has_tailored_cv=any(d.kind == DocumentKind.cv for d in docs),
+            has_tailored_cover_letter=any(d.kind == DocumentKind.cover_letter for d in docs),
+            events=[PipelineEventOut(
+                from_status=e.from_status.value if e.from_status else None,
+                to_status=e.to_status.value, at=e.at) for e in evs],
+        ))
+
+    # Most recently moved first — the desk you touched last is the one you care about.
+    rows.sort(key=lambda r: r.updated_at, reverse=True)
+    by_status: dict[str, int] = {}
+    for r in rows:
+        by_status[r.status] = by_status.get(r.status, 0) + 1
+    # "Stalest" = longest sitting in a stage that is still in play (a rejection
+    # is not stale, it is finished).
+    live = [r.days_in_stage for r in rows
+            if r.status not in ("rejected", "not_applied") and r.days_in_stage is not None]
+    return PipelineOut(rows=rows, by_status=by_status, total=len(rows),
+                       stalest_days=max(live) if live else None)
 
 
 # ---------- Refresh ---------------------------------------------------------
@@ -290,10 +468,18 @@ def _append_refresh_history(result: dict) -> None:
             "at": datetime.utcnow().isoformat(),
             "scraped": result.get("scraped_banks"),
             "failed": result.get("failed"),
+            # Reasons too, so a pattern in the history says *why* a bank keeps
+            # failing, not just that it did.
+            "failed_detail": result.get("failed_detail"),
             "suspect_zero": result.get("suspect_zero"),
+            "suspect_detail": result.get("suspect_detail"),
             "inserted": result.get("inserted"),
             "updated": result.get("updated"),
             "removed": result.get("removed"),
+            "trigger": result.get("trigger"),
+            "events": {k: (result.get("events") or {}).get(k)
+                       for k in ("inserted", "kept", "failed")},
+            "email": result.get("email"),
         }, ensure_ascii=False)
         with open(BACKEND_DIR / "data" / "refresh_history.jsonl", "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -301,7 +487,70 @@ def _append_refresh_history(result: dict) -> None:
         logger.debug("could not append refresh history", exc_info=True)
 
 
-async def _do_refresh():
+async def _safe_refresh_events() -> dict:
+    try:
+        return await refresh_events()
+    except Exception as e:  # never let events sink the offer refresh
+        logger.exception("events refresh failed: %s", e)
+        return {"error": str(e)}
+
+
+def _last_refresh_at() -> Optional[datetime]:
+    """Start time of the most recent refresh, from refresh_history.jsonl (which
+    survives restarts — so the 24h clock does too)."""
+    p = BACKEND_DIR / "data" / "refresh_history.jsonl"
+    try:
+        with open(p, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode("utf-8", "ignore").strip().splitlines()
+        for line in reversed(lines):
+            try:
+                return datetime.fromisoformat(json.loads(line)["at"])
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def _next_auto_refresh_at(st: Settings) -> Optional[datetime]:
+    if not st.auto_refresh:
+        return None
+    last = _last_refresh_at()
+    return (last + timedelta(hours=st.auto_refresh_hours or 24)) if last else datetime.utcnow()
+
+
+AUTO_REFRESH_CHECK_S = 600
+_auto_state: dict = {"last_attempt": None}
+
+
+async def _auto_refresh_loop() -> None:
+    """Refresh every `auto_refresh_hours` (default 24) while the backend runs.
+    Checks every 10 minutes against the last refresh time on disk, so a PC that
+    was off overnight catches up shortly after the platform is launched."""
+    await asyncio.sleep(60)  # let the app finish starting first
+    while True:
+        try:
+            with Session(ENGINE) as s:
+                st = s.get(Settings, 1)
+                due = st and _next_auto_refresh_at(st)
+            now = datetime.utcnow()
+            # A refresh that crashed writes no history line; without this the
+            # loop would retry it every 10 minutes.
+            recent_try = _auto_state["last_attempt"] and now - _auto_state["last_attempt"] < timedelta(hours=1)
+            if due and now >= due and not recent_try and not _refresh_lock.locked():
+                _auto_state["last_attempt"] = now
+                logger.info("auto-refresh: due (last refresh %s)", _last_refresh_at())
+                await _do_refresh(trigger="auto")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("auto-refresh loop error")
+        await asyncio.sleep(AUTO_REFRESH_CHECK_S)
+
+
+async def _do_refresh(trigger: str = "manual"):
     global _last_refresh
     async with _refresh_lock:
         _last_refresh = {"status": "running", "started_at": datetime.utcnow(), "finished_at": None, "result": None}
@@ -314,7 +563,15 @@ async def _do_refresh():
 
         try:
             scrapers = build_scrapers(headless=True)
-            result = await refresh_all(scrapers, progress=_progress)
+            # Events are a handful of quick JSON/XML feeds: run them alongside
+            # the bank scrapers rather than after the slowest one.
+            result, events_res = await asyncio.gather(
+                refresh_all(scrapers, progress=_progress), _safe_refresh_events())
+            result["events"] = events_res
+            result["trigger"] = trigger
+            # One digest per refresh; a failed send leaves items pending for
+            # the next one (see notifier.send_new_items_digest).
+            result["email"] = await asyncio.to_thread(notifier.send_new_items_digest)
             _last_refresh = {
                 "status": "done",
                 "started_at": _last_refresh["started_at"],
@@ -918,6 +1175,22 @@ async def apply_assist(
     profile["offer_country"] = o.country
     extra_docs = [d for d in (settings.extra_documents or []) if d.get("path") and Path(d["path"]).exists()]
 
+    # Launch the browser BEFORE touching application state. The assist loop below
+    # is fire-and-forget, so a launch failure (Playwright browser missing after a
+    # version bump, locked profile dir) used to be invisible: the endpoint still
+    # returned 200 and still marked the offer "applied" while no window ever
+    # opened, putting fake sends in the funnel. AssistBrowser is a singleton, so
+    # run_assist reuses this context instead of launching a second one.
+    from apply_assist import AssistBrowser
+    try:
+        await AssistBrowser.get()
+    except Exception as e:
+        logger.warning("apply-assist: browser launch failed for offer %s: %s", offer_id, e)
+        raise HTTPException(
+            502,
+            f"Could not launch the assist browser, so nothing was opened or marked applied: {e}",
+        )
+
     # Mark as applied immediately (user reviews + submits in browser).
     app_row = session.exec(select(Application).where(Application.offer_id == offer_id)).first()
     if not app_row:
@@ -1003,10 +1276,18 @@ def stats(session: Session = Depends(get_session)):
     notif_count = session.exec(
         select(func.count(Notification.id)).where(Notification.dismissed == False)  # noqa: E712
     ).one()
+    # Start years present in the data, so the UI can offer a "starts in <year>"
+    # filter without hardcoding a range that goes stale every season.
+    by_start_year: dict[str, int] = {}
+    for o in session.exec(select(Offer).where(Offer.is_active == True)).all():  # noqa: E712
+        y = _offer_start_year(o)
+        key = str(y) if y else "unknown"
+        by_start_year[key] = by_start_year.get(key, 0) + 1
     return {
         "total_active_offers": total,
         "by_status": by_status,
         "by_bank": by_bank,
+        "by_start_year": by_start_year,
         "unread_notifications": notif_count,
     }
 
@@ -1139,6 +1420,215 @@ def dashboard(session: Session = Depends(get_session)):
         "recent_offers": recent_offers,
         "activity": activity,
     }
+
+
+# ---------- Events ----------------------------------------------------------
+
+class EventOut(BaseModel):
+    id: int
+    bank: str
+    title: str
+    event_type: str
+    relevance: str
+    division: Optional[str]
+    is_virtual: bool
+    location: Optional[str]
+    city: Optional[str]
+    country: Optional[str]
+    school: Optional[str]
+    starts_at: Optional[datetime]
+    ends_at: Optional[datetime]
+    all_day: bool
+    timezone: Optional[str]
+    registration_deadline: Optional[datetime]
+    registration_open: bool
+    register_url: str
+    source_url: Optional[str]
+    description: Optional[str]
+    manual: bool
+    first_seen_at: datetime
+    is_active: bool
+    reg_status: str
+    notes: Optional[str]
+
+
+def _event_out(e: RecruitingEvent) -> EventOut:
+    return EventOut(**{k: getattr(e, k) for k in EventOut.model_fields if k != "reg_status"},
+                    reg_status=e.reg_status.value if hasattr(e.reg_status, "value") else e.reg_status)
+
+
+@app.get("/api/events", response_model=list[EventOut])
+def list_events(include_past: bool = False, session: Session = Depends(get_session)):
+    """Active, non-dismissed events, soonest first. Past events are hidden
+    unless asked for, except ones the user registered for/attended."""
+    rows = session.exec(select(RecruitingEvent).where(RecruitingEvent.hidden == False)).all()  # noqa: E712
+    today = datetime.utcnow().date()
+    out = []
+    for e in rows:
+        mine = e.reg_status in (EventRegStatus.registered, EventRegStatus.attended)
+        if not e.is_active and not mine and not e.manual:
+            continue
+        last = e.ends_at or e.starts_at
+        if not include_past and last and last.date() < today and not mine:
+            continue
+        out.append(e)
+    out.sort(key=lambda e: (e.starts_at is None, e.starts_at or datetime.max))
+    return [_event_out(e) for e in out]
+
+
+class EventPatch(BaseModel):
+    reg_status: Optional[EventRegStatus] = None
+    notes: Optional[str] = None
+    hidden: Optional[bool] = None
+
+
+@app.patch("/api/events/{event_id}", response_model=EventOut)
+def update_event(event_id: int, body: EventPatch, session: Session = Depends(get_session)):
+    e = session.get(RecruitingEvent, event_id)
+    if not e:
+        raise HTTPException(404, "Event not found")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(e, k, v)
+    session.add(e)
+    session.commit()
+    session.refresh(e)
+    return _event_out(e)
+
+
+class EventCreate(BaseModel):
+    bank: str
+    title: str
+    register_url: str
+    starts_at: Optional[datetime] = None
+    registration_deadline: Optional[datetime] = None
+    location: Optional[str] = None
+    is_virtual: bool = False
+    notes: Optional[str] = None
+
+
+@app.post("/api/events", response_model=EventOut)
+def create_event(body: EventCreate, session: Session = Depends(get_session)):
+    """An event found elsewhere (Bright Network, a careers fair, a LinkedIn
+    post) — tracked alongside the scraped ones, never touched by refresh."""
+    if not body.title.strip() or not body.register_url.strip():
+        raise HTTPException(400, "title and register_url are required")
+    e = RecruitingEvent(
+        bank=body.bank.strip() or "Other",
+        external_id=f"manual-{datetime.utcnow().timestamp()}",
+        title=body.title.strip(),
+        event_type=classify_type(body.title),
+        relevance=classify_relevance(body.title),
+        register_url=body.register_url.strip(),
+        starts_at=body.starts_at,
+        registration_deadline=body.registration_deadline,
+        location=body.location,
+        is_virtual=body.is_virtual,
+        notes=body.notes,
+        manual=True,
+    )
+    session.add(e)
+    session.commit()
+    session.refresh(e)
+    return _event_out(e)
+
+
+@app.delete("/api/events/{event_id}")
+def delete_event(event_id: int, session: Session = Depends(get_session)):
+    """Manual events are deleted; scraped ones are hidden (deleting would just
+    bring them back on the next refresh)."""
+    e = session.get(RecruitingEvent, event_id)
+    if not e:
+        raise HTTPException(404, "Event not found")
+    if e.manual:
+        session.delete(e)
+    else:
+        e.hidden = True
+        session.add(e)
+    session.commit()
+    return {"ok": True}
+
+
+# ---------- Automation: daily refresh + email digest ------------------------
+
+class AutomationOut(BaseModel):
+    auto_refresh: bool
+    auto_refresh_hours: int
+    last_refresh_at: Optional[datetime]
+    next_refresh_at: Optional[datetime]
+    email_notifications: bool
+    notify_email: Optional[str]
+    smtp_host: Optional[str]
+    smtp_port: Optional[int]
+    smtp_user: Optional[str]
+    has_smtp_password: bool
+    email_status: dict
+
+
+class AutomationIn(BaseModel):
+    auto_refresh: Optional[bool] = None
+    auto_refresh_hours: Optional[int] = None
+    email_notifications: Optional[bool] = None
+    notify_email: Optional[str] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None  # "" leaves the stored one unchanged
+
+
+def _automation_out(st: Settings) -> AutomationOut:
+    return AutomationOut(
+        auto_refresh=bool(st.auto_refresh),
+        auto_refresh_hours=st.auto_refresh_hours or 24,
+        last_refresh_at=_last_refresh_at(),
+        next_refresh_at=_next_auto_refresh_at(st),
+        email_notifications=bool(st.email_notifications),
+        notify_email=st.notify_email,
+        smtp_host=st.smtp_host,
+        smtp_port=st.smtp_port,
+        smtp_user=st.smtp_user,
+        has_smtp_password=bool(st.smtp_password),
+        email_status=notifier.status(st),
+    )
+
+
+@app.get("/api/settings/automation", response_model=AutomationOut)
+def get_automation(session: Session = Depends(get_session)):
+    return _automation_out(session.get(Settings, 1))
+
+
+@app.put("/api/settings/automation", response_model=AutomationOut)
+def put_automation(body: AutomationIn, session: Session = Depends(get_session)):
+    st = session.get(Settings, 1)
+    data = body.model_dump(exclude_unset=True)
+    if not data.get("smtp_password"):
+        data.pop("smtp_password", None)
+    if "auto_refresh_hours" in data:
+        data["auto_refresh_hours"] = max(1, min(168, int(data["auto_refresh_hours"] or 24)))
+    for k in ("notify_email", "smtp_host", "smtp_user", "smtp_password"):
+        if isinstance(data.get(k), str):
+            data[k] = data[k].strip() or None
+    if data.get("smtp_password"):
+        data["smtp_password"] = data["smtp_password"].replace(" ", "")  # Gmail shows app passwords in 4-char groups
+    turning_on = data.get("email_notifications") and not st.email_notifications
+    for k, v in data.items():
+        setattr(st, k, v)
+    if turning_on:
+        # Start the clock now: only items first seen from here on are emailed,
+        # so enabling this doesn't mail the whole existing backlog.
+        st.notify_since = datetime.utcnow()
+    session.add(st)
+    session.commit()
+    session.refresh(st)
+    return _automation_out(st)
+
+
+@app.post("/api/settings/automation/test-email")
+def test_email():
+    try:
+        notifier.send_test_email()
+    except notifier.NotifyError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 # ---------- Helpers ---------------------------------------------------------

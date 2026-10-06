@@ -2,6 +2,9 @@ import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from './api'
 import OffersPage from './pages/OffersPage'
+import PipelinePage from './pages/PipelinePage'
+import OutreachPage from './pages/OutreachPage'
+import EventsPage from './pages/EventsPage'
 import OfferDetailPage from './pages/OfferDetailPage'
 import SettingsPage from './pages/SettingsPage'
 import ProfilePage from './pages/ProfilePage'
@@ -13,6 +16,9 @@ import { Particles, LiveClock } from './lib/fx'
 
 const NAV = [
   { to: '/', label: 'Offers' },
+  { to: '/events', label: 'Events' },
+  { to: '/pipeline', label: 'Pipeline' },
+  { to: '/outreach', label: 'Outreach' },
   { to: '/profile', label: 'Profile' },
   { to: '/settings', label: 'Settings' },
 ]
@@ -62,6 +68,9 @@ export default function App() {
         <div key={loc.pathname} className="animate-pagein">
           <Routes location={loc}>
             <Route path="/" element={<OffersPage />} />
+            <Route path="/events" element={<EventsPage />} />
+            <Route path="/pipeline" element={<PipelinePage />} />
+            <Route path="/outreach" element={<OutreachPage />} />
             <Route path="/offers/:id" element={<OfferDetailPage />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/settings" element={<SettingsPage />} />

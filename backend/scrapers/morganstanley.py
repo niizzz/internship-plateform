@@ -1,123 +1,98 @@
-"""Morgan Stanley careers scraper (Workday CXS)."""
+"""Morgan Stanley careers scraper (Students & Graduates board).
+
+MS splits its postings across two systems and only ONE of them carries
+programmes. The Workday `External` board (ms.wd5.myworkdayjobs.com), which this
+scraper used to read, is experienced-hire only: a full EU pull on 2026-09-07
+returned 114 roles and not a single internship or graduate programme, which is
+why this bank sat at zero offers while S&T summer applications were open. There
+is no `Campus`/`University` tenant on that Workday host (all 404), and the
+morganstanley.eightfold.ai careers site mirrors the same experienced-hire feed.
+
+Student and graduate programmes live on Morgan Stanley's own AEM career service,
+which returns the WHOLE board — full HTML descriptions inline — in one request,
+so there is no per-offer enrichment pass. Applications are handed off to tal.net.
+"""
 from __future__ import annotations
 
-import asyncio
+import html
 import logging
+import re
 
 import httpx
 
-from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
+from .base import BankScraper, ScrapedOffer, html_to_text
 
 logger = logging.getLogger(__name__)
 
-API = "https://ms.wd5.myworkdayjobs.com/wday/cxs/ms/External/jobs"
-JOB_URL_TMPL = "https://ms.wd5.myworkdayjobs.com/External{external_path}"
-DETAIL_URL_TMPL = "https://ms.wd5.myworkdayjobs.com/wday/cxs/ms/External{external_path}"
+API = "https://www.morganstanley.com/web/career_services/webapp/service/careerservice/resultset.json"
+CAREERS_URL = "https://www.morganstanley.com/careers/career-opportunities-search?opportunity=sg"
 
-EUROPE_COUNTRY_IDS = [
-    "29247e57dbaf46fb855b224e03170bc7",  # United Kingdom
-    "9db257f5937e4421b2fac64eec6832f8",  # Hungary
-    "dcc5b7608d8644b3a93716604e78e995",  # Germany
-    "54c5b6971ffb4bf0b116fe7651ec789a",  # France
-    "131d5ac7e3ee4d7b962bdc96e498e412",  # Poland
-    "04a05835925f45b3a59406a2a6b72c8a",  # Ireland
-]
-
-PAGE_SIZE = 20
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Origin": "https://ms.wd5.myworkdayjobs.com",
-    "Referer": "https://ms.wd5.myworkdayjobs.com/External",
+    "Referer": CAREERS_URL,
 }
+
+# The feed escapes titles to "&amp;" and then drops the bare "&", leaving stubs
+# like "Sales amp; Trading". Repair before is_snt_role ever reads the title.
+_ENTITY_STUB_RE = re.compile(r"\bamp;\s*")
+
+
+def _clean_title(raw: str) -> str:
+    return " ".join(_ENTITY_STUB_RE.sub("& ", html.unescape(raw or "")).split())
 
 
 class MorganStanleyScraper(BankScraper):
     bank_name = "Morgan Stanley"
-    careers_url = "https://www.morganstanley.com/people-opportunities/students-graduates"
+    careers_url = CAREERS_URL
 
     async def scrape(self) -> list[ScrapedOffer]:
+        params = {"opportunity": "sg", "lang": "EN", "location": ""}
+        async with httpx.AsyncClient(timeout=45, headers=HEADERS) as client:
+            try:
+                r = await client.get(API, params=params)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Morgan Stanley: students & graduates board failed: {e}") from e
+
+        rows = data.get("resultSet") or []
+        if not rows:
+            # The board is never legitimately empty — MS keeps programmes listed
+            # year-round. An empty resultSet means the feed moved or broke.
+            raise RuntimeError("Morgan Stanley: board returned an empty resultSet")
+
         offers: dict[str, ScrapedOffer] = {}
-        async with httpx.AsyncClient(timeout=30, headers=HEADERS) as client:
-            offset = 0
-            while True:
-                body = {
-                    "appliedFacets": {"Location_Country": EUROPE_COUNTRY_IDS},
-                    "limit": PAGE_SIZE,
-                    "offset": offset,
-                    "searchText": "",
-                }
-                try:
-                    r = await client.post(API, json=body)
-                    r.raise_for_status()
-                    data = r.json()
-                except Exception as e:
-                    logger.warning("MS offset=%d failed: %s — backoff", offset, e)
-                    await asyncio.sleep(3.0)
-                    try:
-                        r = await client.post(API, json=body)
-                        r.raise_for_status()
-                        data = r.json()
-                    except Exception as e2:
-                        if not offers:
-                            raise RuntimeError(f"Morgan Stanley: first page failed after retry: {e2}")
-                        logger.error("MS giving up — returning %d partial offers: %s", len(offers), e2)
-                        break
-                postings = data.get("jobPostings") or []
-                if not postings:
-                    break
-                for p in postings:
-                    ext_path = p.get("externalPath") or ""
-                    ext_id = ext_path.rsplit("_", 1)[-1] if "_" in ext_path else ext_path
-                    if not ext_id or ext_id in offers:
-                        continue
-                    offers[ext_id] = ScrapedOffer(
-                        bank="Morgan Stanley",
-                        external_id=ext_id,
-                        role_title=p.get("title") or "",
-                        location=p.get("locationsText") or "",
-                        apply_url=JOB_URL_TMPL.format(external_path=ext_path),
-                        source_url=self.careers_url,
-                        posted_raw=p.get("postedOn"),  # relative; enrich overrides with absolute startDate
-                        extras={"external_path": ext_path, "posted_on": p.get("postedOn")},
-                    )
-                offset += PAGE_SIZE
-                if len(postings) < PAGE_SIZE:
-                    break
-                await asyncio.sleep(0.5)
-        # Enrich only likely early-careers roles, not every EU posting.
-        to_enrich = [o for o in offers.values() if _PROGRAM_RE.search(o.role_title.lower())]
-        logger.info("Morgan Stanley: %d EU offers (%d to enrich)", len(offers), len(to_enrich))
-        await self._enrich_descriptions(to_enrich)
+        for j in rows:
+            ext_id = str(j.get("jobNumber") or "").strip()
+            # jobNumber is the requisition number MS shows as "Job #" and the id
+            # tal.net applies against — stable across re-imports (invariant 10).
+            if not ext_id or ext_id in offers:
+                continue
+            desc = html_to_text(j.get("jobHtmlDescription") or "") or (j.get("jobDescription") or "")
+            deadline = str(j.get("applicationDate") or "").strip()
+            if deadline:
+                # No deadline column on Offer — surface it where the user reads.
+                desc = f"Application deadline: {deadline}\n\n{desc}"
+            location = j.get("location") or ", ".join(
+                p for p in (j.get("city"), j.get("country")) if p)
+            offers[ext_id] = ScrapedOffer(
+                bank=self.bank_name,
+                external_id=ext_id,
+                role_title=_clean_title(j.get("jobTitle") or ""),
+                location=location,
+                apply_url=j.get("url") or CAREERS_URL,
+                source_url=CAREERS_URL,
+                description=desc,
+                program_type=j.get("employmentType"),
+                extras={
+                    "job_number": ext_id,
+                    "division": j.get("division"),
+                    "business_area": j.get("businessArea"),
+                    "application_deadline": deadline,
+                },
+            )
+
+        logger.info("Morgan Stanley: %d students & graduates postings", len(offers))
         return list(offers.values())
-
-    async def _enrich_descriptions(self, offers: list[ScrapedOffer]) -> None:
-        if not offers:
-            return
-        async with httpx.AsyncClient(timeout=20, headers=HEADERS) as client:
-            sem = asyncio.Semaphore(3)
-
-            async def one(o: ScrapedOffer):
-                path = o.extras.get("external_path")
-                if not path:
-                    return
-                async with sem:
-                    try:
-                        r = await client.get(DETAIL_URL_TMPL.format(external_path=path))
-                        if r.status_code != 200:
-                            return
-                        d = r.json()
-                    except Exception:
-                        return
-                    await asyncio.sleep(0.2)
-                jp = d.get("jobPostingInfo", {})
-                # Workday startDate is the (absolute) posting date, not the job
-                # start — use it for posted_at; the real start comes from text.
-                if jp.get("startDate"):
-                    o.posted_raw = jp.get("startDate")
-                clean = html_to_text(jp.get("jobDescription") or "")
-                if clean:
-                    o.description = clean
-
-            await asyncio.gather(*(one(o) for o in offers))

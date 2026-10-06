@@ -77,6 +77,103 @@ _YES = ["yes", "oui", "ja", "y"]
 _NO = ["no", "non", "nein", "n"]
 
 
+# --- phone formatting ---------------------------------------------------------
+# Dial code -> country names as ATS dial-code pickers spell them. The first name
+# is the preferred match: several countries share a code (+44 also lists
+# Guernsey/Jersey/Isle of Man, +1 lists Canada), so the digits alone are ambiguous.
+_DIAL_COUNTRIES = {
+    "33": ["france"], "44": ["united kingdom", "uk", "great britain"],
+    "212": ["morocco", "maroc"], "49": ["germany", "deutschland"],
+    "41": ["switzerland", "suisse", "schweiz"], "39": ["italy", "italia"],
+    "34": ["spain", "españa"], "32": ["belgium", "belgique"],
+    "31": ["netherlands"], "352": ["luxembourg"], "353": ["ireland"],
+    "351": ["portugal"], "43": ["austria"], "46": ["sweden"], "45": ["denmark"],
+    "47": ["norway"], "358": ["finland"], "48": ["poland"], "30": ["greece"],
+    "420": ["czech republic", "czechia"], "40": ["romania"], "36": ["hungary"],
+    "1": ["united states", "usa"], "971": ["united arab emirates"],
+    "65": ["singapore"], "852": ["hong kong"], "213": ["algeria"], "216": ["tunisia"],
+}
+# Countries whose NATIONAL format adds a trunk "0" in front of the subscriber
+# number (+33 6 12 34 56 78 is written 06 12 34 56 78 at home). Italy, Spain,
+# Portugal, Luxembourg, the Nordics bar Sweden/Finland, Greece, Poland, US and
+# Singapore have no trunk prefix: their national form is the bare number.
+_TRUNK_ZERO = {"33", "44", "49", "41", "43", "32", "31", "212", "353", "46", "358",
+               "40", "971", "213", "216"}
+
+
+def _split_phone(intl: str) -> tuple[str, str]:
+    """'+33 6 12 34 56 78' -> ('33', '612345678'). Dial codes are 1-3 digits and
+    prefix-free, so match the known table longest-first — a compact '+337436…'
+    must not read as dial 337. Unknown codes fall back to the digits before the
+    first space. A number with no '+'/'00' prefix has no dial code: ('', digits)."""
+    s = (intl or "").strip()
+    digits = re.sub(r"\D", "", s)
+    if s.startswith("00"):
+        digits, s = digits[2:], "+" + s[2:]
+    if not s.startswith("+"):
+        return "", digits.lstrip("0")
+    for n in (3, 2, 1):
+        if digits[:n] in _DIAL_COUNTRIES:
+            return digits[:n], digits[n:].lstrip("0")
+    m = re.match(r"^\+\s*(\d{1,3})\D", s)
+    if m:
+        return m.group(1), digits[len(m.group(1)):].lstrip("0")
+    return "", digits
+
+
+def _national_display(intl: str) -> str:
+    """The number as dialled inside its own country, for a field that sits next
+    to a separate country-code picker: '+33 6 12 34 56 78' -> '0612345678'."""
+    dial, nsn = _split_phone(intl)
+    return ("0" + nsn) if dial in _TRUNK_ZERO else nsn
+
+
+def _dial_from_text(raw: str) -> str:
+    """Dial digits a country-code control currently shows, from its value or
+    visible text: '+33', 'France (+33)', '33', 'France' -> '33'. '' when it shows
+    a placeholder ('Select…') or nothing recognisable."""
+    t = (raw or "").strip().lower()
+    m = re.search(r"\+\s?(\d{1,4})\b", t)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"\(?(\d{1,4})\)?", t)
+    if m:
+        return m.group(1)
+    for d, names in _DIAL_COUNTRIES.items():
+        if any(re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", t) for n in names if len(n) > 2):
+            return d
+    return ""
+
+
+def _phone_value(intl: str, info: dict) -> Optional[str]:
+    """What to type into one phone input, given its context from _PHONE_INFO_JS.
+    None = don't type yet (a separate code picker shows a DIFFERENT country and
+    couldn't be changed — the national number would be read under that code).
+
+    - intl-tel-input / react-phone-input: full international number; the widget
+      parses the '+33' and sets its own flag.
+    - a separate country-code control: national number with trunk 0
+      ('0612345678'); the code lives in the other control.
+    - a lone field: full international, which is unambiguous to any reader —
+      unless the field can't hold it (digits-only pattern / type=number, or a
+      maxlength shorter than it), then compact '+33612345678' or national."""
+    dial, nsn = _split_phone(intl)
+    if info.get("iti"):
+        return intl
+    if info.get("hasDial"):
+        cur = _dial_from_text(info.get("dialVal", ""))
+        if dial and cur and cur != dial:
+            return None
+        return _national_display(intl)
+    compact = ("+" + dial + nsn) if dial else nsn
+    max_len = int(info.get("maxLen") or 0)
+    if info.get("noPlus"):
+        return _national_display(intl)
+    if 0 < max_len < len(intl):
+        return compact if len(compact) <= max_len else _national_display(intl)
+    return intl
+
+
 def build_field_values(profile: dict) -> list[list]:
     """Ordered fill rules, ready to ship to the page as JS data.
 
@@ -112,9 +209,9 @@ def build_field_values(profile: dict) -> list[list]:
     }.get(gender)
 
     dial = None
-    m = re.match(r"^\+(\d{1,3})", (profile.get("phone") or "").strip())
-    if m:
-        dial = "+" + m.group(1)
+    dial_d, _nsn = _split_phone(profile.get("phone") or "")
+    if dial_d:
+        dial = "+" + dial_d
 
     nationality = profile.get("nationality")
     nat_alts = None
@@ -149,10 +246,18 @@ def build_field_values(profile: dict) -> list[list]:
     add(r"full[\s_-]*name|^name$|your name|legal name", profile.get("full_name"))
     add(r"e[\s_-]*mail|courriel", profile.get("email"))
     # Dial code before the generic phone rule ("country phone code" selects).
-    add(r"(?:country|dial(?:l?ing)?|international)[\s_-]*(?:phone[\s_-]*)?code|indicatif",
-        dial, [dial, (dial or "").lstrip("+"), "france"])
-    add(r"phone|mobile|telephone|t[ée]l[ée]phone|portable", profile.get("phone"),
-        None, "phone")
+    # Wordings seen: "Country code", "Dial code", "Country phone code",
+    # "International Calling code" (SuccessFactors/HSBC), "Phone country code".
+    add(r"(?:country|dial(?:l?ing)?|international|calling)[\s_-]*(?:(?:calling|dial(?:l?ing)?|phone)[\s_-]*)?code"
+        r"|phone[\s_-]*country[\s_-]*code|indicatif|vorwahl|prefisso|prefijo",
+        dial, _DIAL_COUNTRIES.get(dial_d, [])[:1] + [dial, (dial or "").lstrip("+")])
+    # Secondary phone slots stay EMPTY: BrassRing offers Mobile / Home / Other
+    # phone, and the old rule copied the mobile into "Other phone" too (and
+    # would do the same to a "Work phone"). They are optional and a duplicated
+    # number is noise, not data.
+    add(r"^(?![\s\S]*(?:other|work|business|office|employer|fax|emergency)[\s_-]*(?:phone|tel))"
+        r"[\s\S]*(?:phone|mobile|telephone|t[ée]l[ée]phone|portable)",
+        profile.get("phone"), None, "phone")
     add(r"linked[\s_-]*in", profile.get("linkedin_url"))
     add(r"github", profile.get("github_url"))
     add(r"portfolio|personal website|web ?site", profile.get("portfolio_url"))
@@ -204,7 +309,14 @@ def build_field_values(profile: dict) -> list[list]:
         profile.get("city"))
     # (?!-level): Oracle city/state inputs carry autocomplete="address-level2/3"
     # — without the guard the street address lands in the City field.
-    add(r"address[\s_-]*line|street|address(?!-level)(?!.*email)|adresse",
+    # The leading (?!.*…) blocks SECONDARY address lines: UBS BrassRing ships an
+    # optional "Address Line 2" (profile_6_0_address2_txt_0) and the old rule
+    # duplicated the street into it. The guard tests the WHOLE field context on
+    # purpose — a positional lookahead would still let the bare "address"
+    # branch match "address line 2".
+    add(r"^(?![\s\S]*(?:address[\s_-]*(?:line[\s_-]*)?[23]\b|line[\s_-]*[23]\b"
+        r"|apartment|apt\b|suite|complement|compl[ée]ment|additional[\s_-]*address))"
+        r"[\s\S]*(?:address[\s_-]*line|street|address(?!-level)(?!.*email)|adresse)",
         profile.get("address"))
     add(r"nationalit|citizenship|citoyennet", profile.get("nationality"), nat_alts)
     add(r"universit|school|college|institution|[ée]cole|hochschule",
@@ -364,6 +476,9 @@ _FILL_JS = r"""
     if (!visible(el) || el.value || el.dataset.idbFilled) continue;
     // cx-select comboboxes need dropdown-option clicks — Python handles them.
     if (String(el.className || "").includes("cx-select")) continue;
+    // SuccessFactors picklists are text inputs too, but a value-set leaves the
+    // hidden real field empty — _fill_sf_picklists types + clicks an option.
+    if (String(el.className || "").includes("rcmpaginatedselect")) continue;
     if (inEntryEditor(el)) continue;
     const m = matchRules(el);
     if (!m) continue;
@@ -808,9 +923,83 @@ async def _cx_pick(frame: Frame, el: ElementHandle, text: Optional[str],
         return False
 
 
+# Locates the country-code control that belongs to a phone input, if any.
+# Climbs at most 4 ancestors and stops once the group holds 2+ other plain
+# inputs — past that point we've left the phone row and a "Country" select
+# there is the ADDRESS country, not a dial code. A control counts as a dial
+# picker by its name/id/label/aria/automation-id/autocomplete
+# ("tel-country-code"), by a value that is just "+NN", or — for an unlabelled
+# <select> — by options that are mostly "+NN" entries.
+_FIND_DIAL_JS = r"""
+const _dialRx = /(?:country|dial(?:l?ing)?|international|calling|phone)[\s_-]*(?:phone[\s_-]*)?code|dialcode|phonecode|countrycode|country-code|indicatif|vorwahl|prefijo|prefisso|tel-country-code/i;
+const _lbl = (c) => {
+  let t = '';
+  if (c.id) { const l = document.querySelector('label[for="'+CSS.escape(c.id)+'"]'); if (l) t = l.textContent || ''; }
+  return t + ' ' + (c.getAttribute('aria-label') || '');
+};
+const _isDial = (c) => {
+  const s = [c.name, c.id, typeof c.className === 'string' ? c.className : '',
+             c.getAttribute('data-automation-id'), c.getAttribute('autocomplete'),
+             c.getAttribute('aria-labelledby') ? (document.getElementById(c.getAttribute('aria-labelledby'))||{}).textContent : '',
+             _lbl(c)].join(' ');
+  if (_dialRx.test(s)) return true;
+  if (c.tagName === 'SELECT') {
+    const o = Array.from(c.options).slice(0, 60);
+    const k = o.filter((x) => /\+\s?\d{1,4}\b/.test(x.textContent || '')).length;
+    return k >= 3 && k >= o.length * 0.5;
+  }
+  const v = String(c.tagName === 'INPUT' ? c.value : c.textContent || '').trim();
+  return /^\+\d{1,4}$/.test(v) || /\(\+\d{1,4}\)\s*$/.test(v);
+};
+const findDial = (el) => {
+  let n = el.parentElement;
+  for (let i = 0; i < 4 && n; i++, n = n.parentElement) {
+    const ctrls = Array.from(n.querySelectorAll(
+      "select,input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file]),button,[role=combobox]"))
+      .filter((c) => c !== el && !c.contains(el) && !el.contains(c));
+    // Check BEFORE accepting a hit: a level holding 2+ other plain inputs is
+    // already past the phone row, and its pickers belong to other fields.
+    // (A phone extension box is the one other input a real phone row may hold.)
+    if (ctrls.filter((c) => (c.tagName === 'INPUT' || c.tagName === 'TEXTAREA') && !_isDial(c)).length >= 2) break;
+    const hit = ctrls.find(_isDial);
+    if (hit) return hit;
+  }
+  // Row-per-field layouts (SuccessFactors tables: "International Calling code"
+  // and "Preferred Contact Number" are separate <tr>s) keep the picker outside
+  // every ancestor of the number. Fall back to document-order neighbours: the
+  // control just before (or after) the number, only if it is NAMED as a dial
+  // code (an options-only guess is too loose this far out), and never across
+  // another text field.
+  const vis = (c) => { const r = c.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  const all = Array.from(document.querySelectorAll(
+    "select,input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file]),[role=combobox]"))
+    .filter((c) => c === el || vis(c));
+  const k = all.indexOf(el);
+  const named = (c) => _dialRx.test([c.name, c.id, c.getAttribute('data-automation-id'),
+                                     c.getAttribute('autocomplete'), _lbl(c)].join(' '));
+  for (const step of [-1, -2, 1]) {
+    const c = all[k + step];
+    if (!c) continue;
+    if (named(c)) return c;
+    if (c.tagName === 'INPUT' && c.getAttribute('role') !== 'combobox') break;
+  }
+  return null;
+};
+const dialShown = (d) => {
+  if (!d) return '';
+  if (d.tagName === 'SELECT') {
+    const o = d.options[d.selectedIndex];
+    return ((o ? o.textContent : '') + ' ' + (d.value || '')).trim();
+  }
+  if (d.tagName === 'INPUT') return String(d.value || '');
+  return String(d.textContent || '').trim().slice(0, 60);
+};
+"""
+
 # Per-phone-input context + widget detection for the typing pass.
 _PHONE_INFO_JS = r"""
 el => {
+""" + _FIND_DIAL_JS + r"""
   const r = el.getBoundingClientRect();
   let label = '';
   if (el.id) { const l = document.querySelector('label[for="'+CSS.escape(el.id)+'"]'); if (l) label = l.textContent || ''; }
@@ -818,15 +1007,17 @@ el => {
   const ctx = [el.name||'', el.id||'', el.placeholder||'', el.getAttribute('aria-label')||'',
                el.getAttribute('autocomplete')||'', label].join(' ').toLowerCase().replace(/\s+/g,' ');
   // intl-tel-input (and clones) manage a country flag internally.
-  const iti = !!el.closest('.iti, .intl-tel-input, [class*="intl-tel"], [class*="PhoneInput"]');
-  // a separate dial-code selector sibling means this field wants the national part.
-  // Covers inputs/selects AND Workday's country-phone-code button dropdown.
-  let dial = null, n = el.parentElement;
-  const dsel = "input[id*='country-code'],input[id*='countryCode'],select[name*='countryCode'],"+
-               "input[name*='dialCode'],[data-automation-id*='countryPhoneCode'] input,select[name*='phoneCode'],"+
-               "button[data-automation-id*='hone-code' i],button[data-automation-id*='honecode' i]";
-  for (let i=0;i<6&&n&&!dial;i++,n=n.parentElement) dial = n.querySelector(dsel);
-  const dialVal = dial ? String(dial.value||'').replace(/\s/g,'') : '';
+  const iti = !!el.closest('.iti, .intl-tel-input, [class*="intl-tel"], [class*="PhoneInput"], .react-tel-input');
+  // a separate dial-code control means this field wants the national number.
+  const dial = iti ? null : findDial(el);
+  // Can this input hold a '+'? type=number / inputmode=numeric / a pattern that
+  // rejects '+33…' but accepts '07…' all mean digits only.
+  let noPlus = el.type === 'number' || el.getAttribute('inputmode') === 'numeric';
+  const pat = el.getAttribute('pattern');
+  if (pat && !noPlus) {
+    try { const p = new RegExp('^(?:' + pat + ')$');
+          noPlus = !p.test('+33612345678') && !p.test('+33 6 12 34 56 78') && p.test('0612345678'); } catch (e) {}
+  }
   // intl-tel-input pre-fills the field with just the dial code ("+33 "); treat
   // a value that is only a country/dial code as still empty so we fill it.
   const v = (el.value||'').trim();
@@ -834,28 +1025,120 @@ el => {
   return {ctx: ctx.slice(0,250), nameId: ((el.name||'')+' '+(el.id||'')).toLowerCase(),
           visible: r.width>1 && r.height>1 && !el.disabled && !el.readOnly,
           empty: emptyish, filledFlag: el.dataset.idbFilled==='1',
-          iti, dialVal, hasDial: !!dial, sig: !!el.closest("[class*='esign'],[class*='signatur']")};
+          iti, hasDial: !!dial, dialVal: dialShown(dial),
+          // Only plain <select>/<input> pickers are set here; Workday buttons and
+          // Oracle cx comboboxes are driven by their own passes.
+          dialSettable: !!dial && (dial.tagName === 'SELECT' ||
+                        (dial.tagName === 'INPUT' && !String(dial.className||'').includes('cx-select')
+                         && dial.getAttribute('role') !== 'combobox')),
+          maxLen: el.maxLength > 0 ? el.maxLength : 0, noPlus,
+          sig: !!el.closest("[class*='esign'],[class*='signatur']")};
+}
+"""
+
+# Point the phone input's own country-code picker at the profile's code.
+# <select>: the option showing "+33" (not "+330"/"+233"), preferring one that
+# also names the country (+44 is shared by UK/Jersey/Guernsey/Isle of Man).
+# Text input: "+33". Fill-only-empty is relaxed for this one control on purpose:
+# its "value" is usually a page default (+1, +44), not something the user chose,
+# and leaving it would put the national number under the wrong country.
+_SET_DIAL_JS = r"""
+(el, a) => {
+""" + _FIND_DIAL_JS + r"""
+  const d = findDial(el);
+  if (!d) return '';
+  const setNative = (x, val) => {
+    const proto = x.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(x, val);
+    x.dispatchEvent(new Event('input', {bubbles: true}));
+    x.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  const codeRx = new RegExp('(?:^|[^\\d])\\+?\\s?' + a.dial + '(?!\\d)');
+  if (d.tagName === 'SELECT') {
+    let best = null, bestS = 0;
+    for (const o of Array.from(d.options)) {
+      const t = ((o.textContent || '') + ' ').toLowerCase(), v = String(o.value || '').toLowerCase();
+      const plus = new RegExp('\\+\\s?' + a.dial + '(?!\\d)').test(t + ' ' + v);
+      const bare = v === a.dial || v === '+' + a.dial || t.trim() === a.dial;
+      const named = a.names.some((n) => t.includes(n));
+      const s = (plus || bare ? 2 : 0) + (named ? 1 : 0) + (named && a.names[0] && t.includes(a.names[0]) ? 1 : 0);
+      if ((plus || bare) && s > bestS) { bestS = s; best = o; }
+    }
+    if (best) setNative(d, best.value);
+  } else if (d.tagName === 'INPUT') {
+    if (!codeRx.test(String(d.value || ''))) setNative(d, '+' + a.dial);
+  }
+  return dialShown(d);
 }
 """
 
 
-def _national_number(intl: str, dial: str = "") -> str:
-    """National digits of an international number: '+33 6 12 34 56 78' -> '612345678'."""
-    digits = re.sub(r"\D", "", intl or "")
-    dial_d = re.sub(r"\D", "", dial or "")
-    if not dial_d:
-        m = re.match(r"^\+(\d{1,3})", (intl or "").strip())
-        dial_d = m.group(1) if m else ""
-    if dial_d and digits.startswith(dial_d):
-        digits = digits[len(dial_d):]
-    return digits.lstrip("0")
+# What country an intl-tel-input widget currently shows: separate dial-code
+# text, the selector's title ("France: +33" / "France (+33)") and its flag class
+# ("iti__fr"). '' when no country is VISIBLE to the user — a flagless widget
+# would leave a national number with no visible country, so we never convert it.
+# Greenhouse hides the widget's own button (0x0) and mirrors the country in a
+# separate React "Country" box ("🇫🇷 +33") in the same phone row; that counts.
+_ITI_DIAL_JS = r"""el => {
+  const it = el.closest('.iti'); if (!it) return '';
+  const b = it.querySelector('.iti__selected-country, .iti__selected-flag');
+  if (!b) return '';
+  const vis = (x) => { const r = x.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  let shown = vis(b);
+  for (let n = it.parentElement, i = 0; !shown && n && i < 4; n = n.parentElement, i++) {
+    shown = Array.from(n.querySelectorAll('.iti__flag, span, div')).some((x) =>
+      !b.contains(x) && !it.contains(x) && vis(x) &&
+      (x.classList.contains('iti__flag') || /^\+\d{1,4}$/.test((x.textContent || '').trim())));
+  }
+  if (!shown) return '';
+  const dc = it.querySelector('.iti__selected-dial-code');
+  const flag = b.querySelector('.iti__flag');
+  const iso = flag ? (Array.from(flag.classList).find((c) => /^iti__[a-z]{2}$/.test(c)) || '').slice(5) : '';
+  return [(dc && dc.textContent) || '', b.getAttribute('title') || '', iso ? 'iso:' + iso : ''].join(' ');
+}"""
+_ISO_DIAL = {"fr": "33", "gb": "44", "ma": "212", "de": "49", "ch": "41", "it": "39",
+             "es": "34", "be": "32", "nl": "31", "lu": "352", "ie": "353", "pt": "351",
+             "us": "1", "at": "43"}
+
+
+def _iti_shown_dial(raw: str) -> str:
+    m = re.search(r"iso:([a-z]{2})", raw or "")
+    return _dial_from_text(re.sub(r"iso:[a-z]{2}", "", raw or "")) or \
+        (_ISO_DIAL.get(m.group(1), "") if m else "")
+
+
+async def _iti_to_national(frame: Frame, el: ElementHandle, intl: str, dial_d: str) -> None:
+    """intl-tel-input shows its own country selector (Greenhouse, Teamtailor).
+    The international number was typed first so the widget picks the country
+    itself; once its selector shows OUR code, retype the box as the national
+    number — the user's rule for any form with a separate country box. If the
+    widget then drops the country, put the international number back."""
+    try:
+        # The flag switches asynchronously after the keystrokes (Teamtailor
+        # takes ~0.5-1s), so poll briefly instead of reading once.
+        for _ in range(6):
+            if _iti_shown_dial(await el.evaluate(_ITI_DIAL_JS)) == dial_d:
+                break
+            await frame.wait_for_timeout(_w(300))
+        else:
+            return
+        await el.fill("")
+        await el.type(_national_display(intl), delay=40)
+        await frame.wait_for_timeout(_w(400))
+        if _iti_shown_dial(await el.evaluate(_ITI_DIAL_JS)) != dial_d:
+            await el.fill("")
+            await el.type(intl, delay=40)
+            await frame.wait_for_timeout(_w(300))
+    except Exception as e:
+        logger.debug("iti national retype failed: %s", e)
 
 
 async def _fill_phone_fields(frame: Frame, state: dict) -> int:
     """Type phone numbers into tel/phone inputs. Typing (not value-set) is
     required for intl-tel-input-style widgets, which reformat on keystrokes and
-    would otherwise keep only the dial code. Types the national part when a
-    separate dial-code selector is present, else the full international number.
+    would otherwise keep only the dial code. The format per field is decided by
+    _phone_value: national ('0612345678') beside a separate country-code picker
+    (set to the profile's code first), international elsewhere.
 
     intl-tel-input finishes initializing a beat after page load and resets the
     field to just its dial code — so a first-pass type can be wiped. We verify
@@ -870,7 +1153,8 @@ async def _fill_phone_fields(frame: Frame, state: dict) -> int:
     filled = 0
     try:
         els = await frame.query_selector_all(
-            "input[type='tel'], input[type='text']:not(.cx-select-input), input:not([type])")
+            "input[type='tel'], input[type='text']:not(.cx-select-input):not(.rcmpaginatedselectinput), "
+            "input:not([type])")
     except Exception:
         return 0
     for el in els:
@@ -895,18 +1179,31 @@ async def _fill_phone_fields(frame: Frame, state: dict) -> int:
             done.add(key)  # give up after several tries; leave for the user
             continue
         attempts[key] = attempts.get(key, 0) + 1
-        # national part when a dial-code selector sits alongside (input/select or
-        # a Workday country-phone-code button); else the full international number
-        if (info["dialVal"] or info.get("hasDial")) and not info["iti"]:
-            value = _national_number(intl, info["dialVal"])
-        else:
-            value = intl
+        dial_d, _nsn = _split_phone(intl)
+        # A separate code picker showing another country (page default +1/+44):
+        # point it at ours first when it's a plain select/input; Workday and
+        # Oracle pickers are set by their own passes, so just retry next pass.
+        if (info.get("hasDial") and dial_d and info.get("dialSettable")
+                and _dial_from_text(info.get("dialVal", "")) != dial_d):
+            try:
+                info["dialVal"] = await el.evaluate(
+                    _SET_DIAL_JS, {"dial": dial_d, "names": _DIAL_COUNTRIES.get(dial_d, [])})
+            except Exception:
+                pass
+        value = _phone_value(intl, info)
+        if value is None:
+            if attempts[key] >= 4:
+                logger.info("phone: country-code picker stuck on %r (profile +%s) — "
+                            "number left for the user", info.get("dialVal"), dial_d)
+            continue
         try:
             await el.scroll_into_view_if_needed(timeout=2000)
             await el.click(timeout=2000)
             await el.fill("")
             await el.type(value, delay=40)
             await frame.wait_for_timeout(_w(400))
+            if info.get("iti") and value == intl and dial_d:
+                await _iti_to_national(frame, el, intl, dial_d)
             got = await el.input_value()
             if len(re.sub(r"\D", "", got or "")) >= 6:
                 await el.evaluate("el => el.dataset.idbFilled = '1'")
@@ -1093,6 +1390,109 @@ async def _wd_pick(frame: Frame, btn: ElementHandle, cands: list[str]) -> bool:
         logger.debug("wd_pick failed: %s", e)
     try:
         await frame.keyboard.press("Escape")
+    except Exception:
+        pass
+    return False
+
+
+# --- SuccessFactors (RCM) picklists ----------------------------------------
+# HSBC, Mizuho and every SAP SuccessFactors career site render each dropdown as
+# <input class="rcmpaginatedselectinput" role="combobox" placeholder="No
+# Selection"> + a hidden real field; typing filters a <ul aria-owns> of
+# <li role="option">. Options can be terse (the calling-code list is just
+# "+1", "+33", "+233"…), so the value is typed and the exact option clicked.
+_SF_PICK_SEL = "input.rcmpaginatedselectinput"
+_SF_INFO_JS = r"""el => {
+  let label = el.getAttribute('aria-label') || '';
+  const tr = el.closest('tr'); const th = tr && tr.querySelector('th,label');
+  if (th) label += ' ' + th.textContent;
+  const r = el.getBoundingClientRect();
+  return {key: el.id || label.slice(0, 60), label: label.replace(/\s+/g, ' ').trim().slice(0, 250),
+          value: (el.value || '').trim(), placeholder: el.getAttribute('placeholder') || '',
+          visible: r.width > 1 && r.height > 1 && !el.disabled,
+          sig: !!el.closest("[class*='esign'],[class*='signatur']")};
+}"""
+_SF_OPTS_JS = r"""el => {
+  const l = document.getElementById(el.getAttribute('aria-owns') || '');
+  const scope = l || document;
+  return Array.from(scope.querySelectorAll("li[role=option]"))
+    .filter(o => o.getBoundingClientRect().height > 0).map(o => (o.textContent || '').trim());
+}"""
+
+
+async def _fill_sf_picklists(frame: Frame, py_rules: list, state: dict,
+                             limit: int = 3) -> int:
+    """Fill empty SuccessFactors picklists that match a rule (calling code,
+    country, gender, yes/no…). One attempt per field per assist."""
+    done: set = state.setdefault("sf_done", set())
+    filled = 0
+    try:
+        els = await frame.query_selector_all(_SF_PICK_SEL)
+    except Exception:
+        return 0
+    for el in els:
+        if filled >= limit:
+            break
+        try:
+            info = await el.evaluate(_SF_INFO_JS)
+            key = info["key"]
+            if not key or key in done or not info["visible"] or info["sig"]:
+                continue
+            if info["value"] and info["value"].lower() != "no selection":
+                done.add(key)          # already chosen — leave it
+                continue
+            ctx = _norm(info["label"])
+            if re.search(r"honey|signatur", ctx):
+                done.add(key)
+                continue
+            cands = None
+            for rx_c, val, alts, kind in py_rules:
+                if kind in ("date", "phone") or not rx_c.search(ctx):
+                    continue
+                cands = [c for c in ([val] + (alts or [])) if c]
+                break
+            done.add(key)
+            if not cands:
+                continue
+            if await _sf_pick(frame, el, cands):
+                filled += 1
+        except Exception:
+            continue
+    return filled
+
+
+async def _sf_pick(frame: Frame, el: ElementHandle, cands: list[str]) -> bool:
+    """Type each candidate into the picklist and click the best option."""
+    try:
+        await el.scroll_into_view_if_needed(timeout=2000)
+    except Exception:
+        pass
+    for c in cands:
+        try:
+            await el.click(timeout=2000)
+            await el.fill("")
+            await el.type(c[:40], delay=40)
+            await frame.wait_for_timeout(_w(1200))
+            opts = await el.evaluate(_SF_OPTS_JS)
+            best = _pick_text([o for o in opts if o.lower() != "no selection"], [c])
+            if best is None:
+                continue
+            opt = frame.locator("li[role=option]", has_text=best)
+            n = await opt.count()
+            for i in range(n):
+                o = opt.nth(i)
+                if (await o.inner_text()).strip() == best and await o.is_visible():
+                    await o.click(timeout=2000)
+                    await frame.wait_for_timeout(_w(400))
+                    return True
+        except Exception as e:
+            logger.debug("sf_pick failed on %r: %s", c, e)
+    # Nothing matched: clear what we typed so the field reads "No Selection"
+    # again instead of holding stray filter text.
+    try:
+        await el.fill("")
+        await frame.keyboard.press("Escape")
+        await el.evaluate("e => e.blur()")   # SF keeps the list open while focused
     except Exception:
         pass
     return False
@@ -1488,6 +1888,13 @@ async def fill_pass(
         except Exception as e:
             logger.debug("workday pass error: %s", e)
 
+        # SuccessFactors picklists (HSBC, Mizuho: calling code, yes/no…).
+        try:
+            if await frame.query_selector(_SF_PICK_SEL):
+                filled_total += await _fill_sf_picklists(frame, state["py_rules"], state)
+        except Exception as e:
+            logger.debug("successfactors pass error: %s", e)
+
         # File uploads: CV into resume-ish inputs, CL into cover-letter-ish,
         # extra documents into "other/additional document" ones.
         try:
@@ -1511,13 +1918,18 @@ async def fill_pass(
         misc_paths = [d["path"] for d in (extra_docs or [])
                       if d.get("path") and Path(d["path"]).exists()]
 
+        # Forms whose "cover letter" is a TEXT box (Teamtailor) have no CL file
+        # slot; the tailored letter then goes into "Additional files" rather
+        # than never reaching the application. Filled in once `routable` is known.
+        cl_to_misc: list = []
+
         def _route(ctx: str) -> Optional[list]:
             if any(w in ctx for w in _CL_WORDS):
                 return [cl_path] if cl_path else []
             if _CV_RX.search(ctx):
                 return [cv_path] if cv_path else []
             if _MISC_RX.search(ctx):
-                return list(misc_paths)
+                return list(misc_paths) + cl_to_misc
             return None
 
         routable = []
@@ -1530,6 +1942,9 @@ async def fill_pass(
                 routable.append((finput, mk))
             except Exception:
                 continue
+        if cl_path and not any(any(w in (mk.get("tight") or "") + " " + (mk.get("wide") or "")
+                                   for w in _CL_WORDS) for _f, mk in routable):
+            cl_to_misc.append(cl_path)
         for finput, mk in routable:
             try:
                 tight = mk.get("tight") or ""
@@ -1600,34 +2015,56 @@ async def run_assist(
     state: dict = {}
     deadline = asyncio.get_event_loop().time() + TAB_LIFETIME_S
 
+    # Follow every tab this session spawns. Some career sites are only a landing
+    # page: the REAL ATS form opens in a NEW TAB (Goldman's higher.gs.com "Apply"
+    # opens Oracle CandidateExperience with target=_blank). Watching just our own
+    # tab meant the engine kept filling the idle landing page while the user sat
+    # in front of an untouched form. `state` is shared across the session's tabs
+    # on purpose — upload dedupe is keyed on frame URL, so a document still
+    # uploads at most once even though several tabs are being swept.
+    session_pages: list[Page] = [page]
+
+    def _follow(pg: Page) -> None:
+        def _on_popup(new_pg: Page) -> None:
+            if new_pg not in session_pages:
+                session_pages.append(new_pg)
+                _follow(new_pg)          # popups of popups (ATS gateways chain)
+                logger.info("assist: following new tab %s", new_pg.url[:120])
+        pg.on("popup", _on_popup)
+
+    _follow(page)
+
     while asyncio.get_event_loop().time() < deadline:
-        try:
-            if page.is_closed():
-                break
-            cv_p = docs_holder.get("cv") if docs_holder is not None else cv_path
-            cl_p = docs_holder.get("cl") if docs_holder is not None else cl_path
-            total_filled += await fill_pass(page, js_rules, cv_p, cl_p,
-                                            extra_docs, state, profile)
-            pending = docs_holder is not None and (docs_holder.get("cv") is None
-                                                   or docs_holder.get("cl") is None)
-            gen_failed = docs_holder is not None and docs_holder.get("failed")
-            if gen_failed:
-                doc_note = " — DOCUMENT GENERATION FAILED, attach CV/cover letter manually"
-            elif pending:
-                doc_note = " — CV/cover letter still generating, they'll attach automatically"
-            else:
-                doc_note = ""
-            badge = (f"Internship DB: auto-filled {total_filled} field(s)"
-                     + doc_note
-                     + " — review everything, then submit yourself")
+        live = [p for p in session_pages if not p.is_closed()]
+        if not live:
+            break
+        cv_p = docs_holder.get("cv") if docs_holder is not None else cv_path
+        cl_p = docs_holder.get("cl") if docs_holder is not None else cl_path
+        pending = docs_holder is not None and (docs_holder.get("cv") is None
+                                               or docs_holder.get("cl") is None)
+        gen_failed = docs_holder is not None and docs_holder.get("failed")
+        if gen_failed:
+            doc_note = " — DOCUMENT GENERATION FAILED, attach CV/cover letter manually"
+        elif pending:
+            doc_note = " — CV/cover letter still generating, they'll attach automatically"
+        else:
+            doc_note = ""
+        for pg in live:
             try:
-                await page.evaluate(_BADGE_JS, badge)
-            except Exception:
-                pass
-        except Exception as e:
-            if page.is_closed():
-                break
-            logger.debug("assist pass error: %s", e)
+                total_filled += await fill_pass(pg, js_rules, cv_p, cl_p,
+                                                extra_docs, state, profile)
+                badge = (f"Internship DB: auto-filled {total_filled} field(s)"
+                         + doc_note
+                         + " — review everything, then submit yourself")
+                try:
+                    await pg.evaluate(_BADGE_JS, badge)
+                except Exception:
+                    pass
+            except Exception as e:
+                if pg.is_closed():
+                    continue
+                logger.debug("assist pass error: %s", e)
         await asyncio.sleep(FILL_INTERVAL_S)
 
-    logger.info("assist finished for %s: %d fields filled", apply_url, total_filled)
+    logger.info("assist finished for %s: %d fields filled across %d tab(s)",
+                apply_url, total_filled, len(session_pages))

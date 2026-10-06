@@ -13,6 +13,9 @@ Status:
   HSBC now scrapes the Emerging Talent board (apply.careers.hsbc.com), which
   carries the real "Markets - Sales and Trading" student programmes; London
   S&T internships appear Sept–Nov.
+  Bank of America sweeps TWO boards: the campus tal.net Atom feed
+  (bankcampuscareers.tal.net — every internship / summer & off-cycle analyst
+  programme) plus the lateral careers servlet.
 """
 from __future__ import annotations
 

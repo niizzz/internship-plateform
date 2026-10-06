@@ -5,12 +5,14 @@
 export interface BankMeta {
   symbol: string       // short ticker, e.g. "GS", "JPM"
   color: string        // brand accent (hex) — drives glow + monogram
-  domain: string       // for the logo (logo.clearbit.com/<domain>)
+  domain: string       // for the favicon services in logoSources()
+  logo?: string        // exact logo URL, tried first — for firms the favicon
+                       // services don't have (see logoSources notes)
   blurb: string        // one-line desk description
 }
 
 const M: Record<string, BankMeta> = {
-  'Goldman Sachs':        { symbol: 'GS',   color: '#7BA0D9', domain: 'goldmansachs.com',   blurb: 'US bulge-bracket. Global Markets — FICC & Equities flow, structuring.' },
+  'Goldman Sachs':        { symbol: 'GS',   color: '#7BA0D9', domain: 'goldmansachs.com',   logo: 'https://cdn.gs.com/images/goldman-sachs/v2/gs-favicon-180.png', blurb: 'US bulge-bracket. Global Markets — FICC & Equities flow, structuring.' },
   'JPMorgan':             { symbol: 'JPM',  color: '#3E6FB0', domain: 'jpmorgan.com',       blurb: 'Largest US bank. Markets across rates, credit, equities and FX.' },
   'Morgan Stanley':       { symbol: 'MS',   color: '#3FA7DC', domain: 'morganstanley.com',  blurb: 'US bulge-bracket. Institutional Securities — FID & Equity structuring.' },
   'Citi':                 { symbol: 'C',    color: '#1E77CC', domain: 'citi.com',           blurb: 'Global markets powerhouse. FX, rates, EM and securitized products.' },
@@ -25,8 +27,8 @@ const M: Record<string, BankMeta> = {
   'Crédit Agricole CIB':  { symbol: 'ACA',  color: '#3EA97A', domain: 'ca-cib.com',         blurb: 'French CIB. FIC, structuring, cross-currency and financing.' },
   'Natixis':              { symbol: 'KN',   color: '#A46BC4', domain: 'natixis.groupebpce.com', blurb: 'BPCE CIB. Structured products, equity derivatives, financing.' },
   'Lazard':               { symbol: 'LAZ',  color: '#C4A968', domain: 'lazard.com',         blurb: 'Advisory & asset-management boutique.' },
-  'Lazard Frères Gestion':{ symbol: 'LFG',  color: '#B79A58', domain: 'lazardfreresgestion.fr', blurb: "Lazard's French AM arm. Fixed income, cross-asset, structured." },
-  'Rothschild & Co':      { symbol: 'ROT',  color: '#4B7BA8', domain: 'rothschildandco.com',blurb: 'Advisory house with wealth & asset management.' },
+  'Lazard Frères Gestion':{ symbol: 'LFG',  color: '#B79A58', domain: 'lazardfreresgestion.fr', logo: 'https://www.lazardfreresgestion.fr/apple-touch-icon.png', blurb: "Lazard's French AM arm. Fixed income, cross-asset, structured." },
+  'Rothschild & Co':      { symbol: 'ROT',  color: '#4B7BA8', domain: 'rothschildandco.com',logo: 'https://www.rothschildandco.com/static/favicons/favicon-192.png', blurb: 'Advisory house with wealth & asset management.' },
   'Commerzbank':          { symbol: 'CBK',  color: '#E0B341', domain: 'commerzbank.com',    blurb: 'German bank. Rates, FX, credit and structured.' },
   'Kepler Cheuvreux':     { symbol: 'KECH', color: '#4C8BD0', domain: 'keplercheuvreux.com',blurb: 'European equities broker. Structured products, execution.' },
   'Nomura':               { symbol: 'NMR',  color: '#D65167', domain: 'nomura.com',         blurb: 'Japanese bank. Global Markets & structured solutions.' },
@@ -56,14 +58,26 @@ export function bankMeta(bank: string): BankMeta {
   return { symbol: initials || '—', color: palette[h % palette.length], domain: '', blurb: 'S&T / markets desk.' }
 }
 
-// Ordered logo sources tried in <CompanyLogo> (each falls through on error to
-// the next, then to a brand monogram). DuckDuckGo has the best-quality icons but
-// 404s some domains (e.g. natixis.com, lazardfreresgestion.fr); Google's favicon
-// service covers most of the rest. Clearbit's logo API is dead (DNS gone).
-export function logoSources(domain: string): string[] {
-  if (!domain) return []
-  return [
-    `https://icons.duckduckgo.com/ip3/${domain}.ico`,
-    `https://www.google.com/s2/favicons?domain=${domain}&sz=128`,
-  ]
+// Ordered logo sources tried in <CompanyLogo> (each falls through to the next,
+// then to a brand monogram). Clearbit's logo API is dead (DNS gone).
+//
+// GOTCHA: DuckDuckGo answers a domain it has no icon for with HTTP 404 but a
+// VALID 48x48 grey-chevron placeholder PNG in the body. A browser decodes that
+// happily and fires `load`, not `error` — so the onError fallback below never
+// runs and the chain STALLS on the chevron instead of reaching Google. Size
+// alone can't detect this (Natixis and CA-CIB have real 48x48 icons), so a firm
+// DDG lacks needs an explicit `logo` URL in the table above, which is tried
+// first and keeps DDG out of the chain entirely. Currently: Goldman Sachs,
+// Rothschild & Co, Lazard Frères Gestion — all three taken from the firm's own
+// site (Rothschild's and Google's favicon services BOTH lack it). When adding a
+// bank, open the app and check the mark actually renders; a grey chevron or a
+// generic globe means it needs a `logo`.
+export function logoSources(m: BankMeta): string[] {
+  const out: string[] = []
+  if (m.logo) out.push(m.logo)
+  if (m.domain) out.push(
+    `https://icons.duckduckgo.com/ip3/${m.domain}.ico`,
+    `https://www.google.com/s2/favicons?domain=${m.domain}&sz=128`,
+  )
+  return out
 }

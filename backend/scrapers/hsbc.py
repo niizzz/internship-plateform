@@ -19,9 +19,9 @@ The board is GLOBAL — we keep only European tiles (ISO country codes are mappe
 to names so the shared Europe filter recognises "Sheffield, GB" etc.). Off-season
 (July–Aug) the board is mostly APAC + a few UK insight programmes; London Markets
 S&T internships appear Sept–Nov. NB pagination: at low volume (~20 roles) the
-board renders everything on one page; the pageNumber loop below stops when a page
-adds no new ids. Re-verify the pagination scheme in-season if the board exceeds
-one page (a future agent's TODO).
+board fits on one page. Pagination is by `startrow` in steps of 25 (verified
+in-season 2026-10-01: pageNumber is ignored); the loop stops when a page adds no
+new ids.
 """
 from __future__ import annotations
 
@@ -37,7 +37,11 @@ from .base import BankScraper, ScrapedOffer, _PROGRAM_RE, html_to_text
 logger = logging.getLogger(__name__)
 
 BASE = "https://apply.careers.hsbc.com"
-RESULTS_TMPL = BASE + "/emergingtalent/search-jobs/results?ActiveFacet=0&locale=en_GB&pageNumber={page}"
+# Paginate with startrow, NOT pageNumber: pageNumber is ignored server-side and
+# every page re-serves the first 25 tiles (in-season the board had 115 roles and
+# we saw only the first 25 — London S&T was beyond row 25).
+RESULTS_TMPL = BASE + "/emergingtalent/search-jobs/results?ActiveFacet=0&locale=en_GB&startrow={start}"
+PAGE_SIZE = 25
 MAX_PAGES = 20
 
 HEADERS = {
@@ -112,7 +116,7 @@ class HSBCScraper(BankScraper):
         async with httpx.AsyncClient(timeout=30, headers=HEADERS, follow_redirects=True) as client:
             for page in range(1, MAX_PAGES + 1):
                 try:
-                    r = await client.get(RESULTS_TMPL.format(page=page))
+                    r = await client.get(RESULTS_TMPL.format(start=(page - 1) * PAGE_SIZE))
                     r.raise_for_status()
                 except Exception as e:
                     if pages_ok == 0:

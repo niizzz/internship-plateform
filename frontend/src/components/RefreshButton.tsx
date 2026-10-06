@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api } from '../api'
 import { useEffect, useState } from 'react'
+import ScraperHealth, { HealthItem } from './ScraperHealth'
 
 export default function RefreshButton() {
   const qc = useQueryClient()
@@ -44,24 +45,19 @@ export default function RefreshButton() {
 
   // Surface scraper health: failed banks + banks held by the zero-yield guard.
   // A silent scraper failure looking identical to "no news" was an audit finding.
-  const failed: string[] = status?.result?.failed ?? []
-  const suspect: string[] = status?.result?.suspect_zero ?? []
+  // The backend sends a reason per bank; fall back to bare names if a refresh
+  // predating that is still the last one in memory.
+  const detail = (names: string[], rows: HealthItem[] | undefined, fallback: string): HealthItem[] =>
+    rows?.length ? rows : names.map(bank => ({ bank, reason: fallback }))
+  const failed = detail(status?.result?.failed ?? [], status?.result?.failed_detail,
+    'scraper errored - no reason recorded')
+  const suspect = detail(status?.result?.suspect_zero ?? [], status?.result?.suspect_detail,
+    'returned 0 offers - deactivation held for one refresh')
   const showHealth = !running && status?.status === 'done' && (failed.length > 0 || suspect.length > 0)
 
   return (
     <div className="flex items-center gap-1.5">
-      {showHealth && (
-        <span
-          className="px-2 py-1 rounded-md bg-neon-rose/10 border border-neon-rose/40 text-neon-rose text-[10px] font-mono font-semibold cursor-help fx-heartbeat"
-          style={{ ['--pulse' as any]: 'rgba(251,113,133,0.3)' }}
-          title={[
-            failed.length ? `FAILED scrapers: ${failed.join(', ')}` : '',
-            suspect.length ? `Zero-yield (held, not wiped): ${suspect.join(', ')}` : '',
-          ].filter(Boolean).join('\n')}
-        >
-          ⚠ {failed.length + suspect.length}
-        </span>
-      )}
+      {showHealth && <ScraperHealth failed={failed} suspect={suspect} />}
       <button
         onClick={() => trigger.mutate()}
         disabled={running}

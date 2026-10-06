@@ -27,6 +27,35 @@ CALL_TIMEOUT_S = 300  # generous: CLI cold-start + long CV + long posting
 # favour of the original bullet; see tailor_cv_json.
 BULLET_MAX = 132
 
+# The candidate's standing target (2026-08-17, refined): SALES on the STRUCTURED
+# EQUITY DERIVATIVES desk. He rates his odds of breaking in on the sales side
+# higher than on trading, and structured equity derivatives is the product area
+# his experience actually evidences (structured products at Lazard/SG, macro
+# structuring at CACIB, FX sales trading at Valoris). Most postings are broader
+# than that ("Global Markets", "FICC & Equities Sales & Trading"), so this steers
+# EMPHASIS and ordering only — it never adds or removes a fact, and it never
+# overrides a posting that is explicitly a different desk or a pure trading seat.
+DESK_EMPHASIS = """DESK EMPHASIS (candidate's target):
+- The candidate is targeting a SALES seat on the STRUCTURED EQUITY DERIVATIVES
+  desk: pricing and pitching structured/equity-linked payoffs (autocallables,
+  reverse convertibles, capital-protected notes, delta-one and volatility
+  products) to institutional and private-bank clients.
+- Wherever the posting genuinely allows it, foreground in this order:
+  (1) client-facing sales evidence — communication, persuasion, relationship
+      building, reading client needs, pitching trade ideas, explaining complex
+      payoffs simply, languages;
+  (2) STRUCTURED PRODUCTS and EQUITY DERIVATIVES product knowledge — payoff
+      mechanics, pricing, volatility, hedging;
+  (3) the quantitative / execution / modelling material, which stays in and is
+      still relevant, but sits after the two above.
+- Prefer the candidate's real structured-products and derivatives vocabulary
+  over generic "financial markets" phrasing when the underlying fact supports it.
+- If the posting is unambiguously a different desk (FICC/rates/credit/FX) or a
+  pure trading / quant / market-making seat, tailor to the posting AS WRITTEN and
+  drop this emphasis — never contort the CV toward a desk the posting is not.
+- This changes ORDER and WORDING only. Never add, drop, or alter a fact, and
+  never claim sales or product experience the CV does not evidence."""
+
 CV_SYSTEM = """You are an expert career coach helping a finance student tailor their CV to pass ATS filters for Sales, Trading, and Structuring internships at top investment banks.
 
 You will receive:
@@ -252,10 +281,16 @@ def tailor_cv_json(base_cv: dict, offer: dict) -> tuple[dict, int]:
     }
     prompt = (
         f"{CV_JSON_SYSTEM}\n\n"
+        f"{DESK_EMPHASIS}\n\n"
         f"CV EDITABLE CONTENT:\n{json.dumps(payload, ensure_ascii=False, indent=1)}\n\n"
         f"Tailor for this job:\n\n{_job_block(offer)}\n\nReturn JSON only."
     )
     parsed = _extract_json(_run_claude(prompt))
+    # Second pass over the REWRITTEN text: strip AI tells with the vendored
+    # humanizer skill before any of it lands in the CV, mirroring what
+    # generate_cover_letter does for the letter body. Falls back to the tailored
+    # text on any failure, so this can only ever change HOW the CV reads.
+    parsed = humanize_cv_json(parsed)
     tailored = copy.deepcopy(base_cv)
     changes = 0
 
@@ -381,6 +416,113 @@ def humanize_cover_letter(body_text: str) -> str:
     return _strip_scaffold(result) or body_text
 
 
+def humanize_cv_json(payload: dict) -> dict:
+    """Third CLI pass on a TAILORED CV: run the profile paragraph, the experience
+    subtitles and the bullets through the vendored humanizer skill so the CV does
+    not read as machine-written.
+
+    Takes/returns the same editable-content shape `tailor_cv_json` builds
+    ({"profile": str, "experience": [{"index", "subtitle"?, "bullets": [...]}]}).
+    Falls back to the input on ANY failure or shape mismatch — a CV that reads a
+    little synthetic beats a CV with mangled or invented content.
+    """
+    guide = _humanizer_instructions()
+    if not guide.strip():
+        return payload
+    profile = (payload.get("profile") or "").strip()
+    entries = [e for e in payload.get("experience", []) if isinstance(e, dict)]
+    if not profile and not entries:
+        return payload
+
+    # Exact per-entry bullet counts, so a dropped or invented bullet is caught.
+    shape = {int(e["index"]): len(e.get("bullets") or [])
+             for e in entries if isinstance(e.get("index"), int)}
+
+    prompt = (
+        f"{guide}\n\n"
+        "======================================================================\n"
+        "TASK: Apply the humanizing guide above to the CV CONTENT below.\n\n"
+        "This is a real CV for a job application, so obey these hard limits:\n"
+        "- Do NOT invent, add, drop, or alter any fact, number, metric, percentage, "
+        "employer, school, job title, tool, language, or date. Change only HOW it "
+        "reads, never WHAT it says. Every number must survive EXACTLY.\n"
+        "- Keep the SAME NUMBER of bullets for each experience entry, in the same "
+        "order, and keep the same entry indexes. Do not merge or split bullets.\n"
+        f"- Each bullet must stay on ONE line: at most {BULLET_MAX} characters, and "
+        "no longer than the bullet you were given. Compress by cutting filler, "
+        "never by cutting facts.\n"
+        "- Keep CV register: terse, punchy, results-first. Bullets stay bullets, "
+        "not sentences with 'I'. Do NOT add personality, humour, hedging, opinions, "
+        "or first-person narration — the humanizer's PERSONALITY guidance is "
+        "overridden here by CV convention.\n"
+        "- Strip the AI tells the guide names: promotional adjectives, inflated "
+        "symbolism, vague attributions, superficial -ing clauses, rule-of-three "
+        "padding, negative parallelisms ('not only ... but also'), filler phrases, "
+        "and AI vocabulary (leverage, spearhead, robust, seamless, comprehensive, "
+        "delve, showcase, pivotal, testament, underscore, foster, landscape).\n"
+        "- Prefer concrete verbs the candidate could defend in an interview: "
+        "priced, quoted, hedged, built, automated, pitched, covered, reconciled.\n"
+        "- Keep standard finance compound terms hyphenated when they modify a noun "
+        "(equity-linked, fixed-income, cross-asset, delta-one, capital-protected, "
+        "market-making, front-office, risk-adjusted, sales-trading). Do NOT strip "
+        "those hyphens.\n"
+        "- No em dashes or en dashes, no emojis, no markdown, no bullet characters.\n"
+        "- Output ONLY strict JSON between <CV> and </CV> tags, same shape as the "
+        "input, with no commentary:\n"
+        '  {"profile": "...", "experience": [{"index": 0, "subtitle": "...", '
+        '"bullets": ["...", "..."]}]}\n'
+        '  Omit "subtitle" for entries that were given none.\n\n'
+        f"<CV_CONTENT>\n{json.dumps(payload, ensure_ascii=False, indent=1)}\n</CV_CONTENT>"
+    )
+    try:
+        out = _run_claude(prompt)
+    except ClaudeCliError as e:
+        logger.warning("CV humanizer pass failed (%s); keeping tailored text", e)
+        return payload
+
+    m = re.search(r"<CV>(.*?)</CV>", out, re.DOTALL)
+    if not m:
+        logger.warning("CV humanizer output missing <CV> tags; keeping tailored text")
+        return payload
+    parsed = _extract_json(m.group(1))
+    if not isinstance(parsed, dict) or not parsed:
+        logger.warning("CV humanizer output was not usable JSON; keeping tailored text")
+        return payload
+
+    result = {"profile": payload.get("profile"), "experience": []}
+    new_prof = parsed.get("profile")
+    if isinstance(new_prof, str) and new_prof.strip():
+        result["profile"] = _drop_dashes(new_prof.strip())
+
+    by_index = {e.get("index"): e for e in parsed.get("experience", [])
+                if isinstance(e, dict)}
+    for src in entries:
+        idx = src.get("index")
+        got = by_index.get(idx)
+        keep = dict(src)
+        if got:
+            sub = got.get("subtitle")
+            if src.get("subtitle") and isinstance(sub, str) and sub.strip():
+                keep["subtitle"] = _drop_dashes(sub.strip())
+            old = list(src.get("bullets") or [])
+            nb = got.get("bullets")
+            if isinstance(nb, list) and old and len(nb) == shape.get(idx, -1):
+                clean = [_drop_dashes(str(x).strip()) for x in nb]
+                if all(clean):
+                    # Same one-line rule tailoring uses: an over-long rewrite
+                    # loses to the text it replaced.
+                    keep["bullets"] = [n if len(n) <= BULLET_MAX else o
+                                       for n, o in zip(clean, old)]
+        result["experience"].append(keep)
+    return result
+
+
+def _drop_dashes(text: str) -> str:
+    """The guide bans em/en dashes; soften any that survived the pass."""
+    text = re.sub(r"\s*[—–]\s*", ", ", text)
+    return re.sub(r",\s*,", ", ", text)
+
+
 def generate_cover_letter(
     base_cv_text: str,
     offer: dict,
@@ -397,6 +539,7 @@ def generate_cover_letter(
     )
     prompt = (
         f"{COVER_LETTER_SYSTEM}\n\n"
+        f"{DESK_EMPHASIS}\n\n"
         f"CANDIDATE CV:\n{base_cv_text}"
         f"{template_block}\n\n"
         f"Write the cover letter body for this job:\n\n{_job_block(offer)}"

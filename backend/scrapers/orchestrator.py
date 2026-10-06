@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 SCRAPER_TIMEOUT_S = 120
 
 
+def _valid_category(raw: Optional[str]) -> Optional[str]:
+    """A scraper-supplied category, but only if it names a real Category."""
+    if not raw:
+        return None
+    try:
+        return Category(raw.lower()).value
+    except ValueError:
+        return None
+
+
 def _coerce_category(raw: Optional[str], fallback: str) -> Category:
     val = (raw or fallback or "markets").lower()
     try:
@@ -42,9 +52,13 @@ _PROGRAM_MATCHERS = [
     (re.compile(r"\binsight\s+(?:day|week|programme|program)\b"), ProgramType.spring_week),
     (re.compile(r"\b(?:industrial\s+placement|year[\s-]in[\s-]industry|placement\s+(?:year|programme|program))\b"), ProgramType.industrial_placement),
     (re.compile(r"\boff[\s-]?cycle\b"), ProgramType.off_cycle),
+    # Must precede the graduate matchers: "Summer Analyst Programme" (Morgan
+    # Stanley names every programme that way) also matches "analyst programme"
+    # below and was landing in `graduate` — a summer analyst seat is the
+    # internship, not the grad scheme.
+    (re.compile(r"\bsummer\s+(?:analyst|associate)\b"), ProgramType.summer_internship),
     (re.compile(r"\b(?:graduate|analyst)\s+(?:programme|program|scheme)\b"), ProgramType.graduate),
     (re.compile(r"\bgraduate\b"), ProgramType.graduate),
-    (re.compile(r"\bsummer\s+(?:analyst|associate)\b"), ProgramType.summer_internship),
     (re.compile(r"\bintern(?:ship)?\b"), ProgramType.summer_internship),
     (re.compile(r"\b(?:stage|stagiaire)\b"), ProgramType.summer_internship),
 ]
@@ -58,24 +72,37 @@ def _coerce_program(raw: Optional[str], title: str) -> ProgramType:
     return ProgramType.other
 
 
-async def _run_one(scraper: BankScraper) -> tuple[str, bool, list[ScrapedOffer]]:
-    """Run one scraper. Returns (bank_name, succeeded, offers).
+def _reason(e: BaseException) -> str:
+    """One-line "why" for a scraper failure, short enough to sit in a hover card."""
+    msg = " ".join(str(e).split())
+    if len(msg) > 160:
+        msg = msg[:157] + "…"
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
+async def _run_one(scraper: BankScraper) -> tuple[str, bool, list[ScrapedOffer], Optional[str]]:
+    """Run one scraper. Returns (bank_name, succeeded, offers, failure_reason).
 
     `succeeded` distinguishes "scraped fine, 0 results" from "scraper errored":
     only successfully-scraped banks have their stale offers deactivated, so a
     transient failure never wipes a bank's listings.
+
+    `failure_reason` is the short human-readable "why" the UI's health badge
+    shows on hover — a bare bank name never said whether it was a timeout, a bot
+    wall or a layout change, so every diagnosis meant digging through the log.
     """
     try:
         async with scraper:
             offers = await asyncio.wait_for(scraper.scrape(), timeout=SCRAPER_TIMEOUT_S)
             logger.info("Scraper %s returned %d offers", scraper.bank_name, len(offers))
-            return scraper.bank_name, True, offers
+            return scraper.bank_name, True, offers, None
     except asyncio.TimeoutError:
         logger.error("Scraper %s timed out after %ss", scraper.bank_name, SCRAPER_TIMEOUT_S)
-        return scraper.bank_name, False, []
+        return (scraper.bank_name, False, [],
+                f"timed out after {SCRAPER_TIMEOUT_S}s — bot wall, hung page or deep pagination")
     except Exception as e:
         logger.exception("Scraper %s failed: %s", scraper.bank_name, e)
-        return scraper.bank_name, False, []
+        return scraper.bank_name, False, [], _reason(e)
 
 
 async def run_all_scrapers(scrapers: list[BankScraper]) -> tuple[list[ScrapedOffer], set[str]]:
@@ -83,7 +110,7 @@ async def run_all_scrapers(scrapers: list[BankScraper]) -> tuple[list[ScrapedOff
     results = await asyncio.gather(*[_run_one(s) for s in scrapers])
     flat: list[ScrapedOffer] = []
     scraped_ok: set[str] = set()
-    for bank, ok, offers in results:
+    for bank, ok, offers, _reason_ in results:
         if ok:
             scraped_ok.add(bank)
         flat.extend(offers)
@@ -116,7 +143,12 @@ def _filter_and_enrich(raw: list[ScrapedOffer]) -> list[ScrapedOffer]:
         desc = o.description or ""
         if not is_internship_or_grad(title, desc):
             continue
-        category = o.category or is_snt_role(title, desc)
+        # A scraper may pre-classify an offer, but ONLY with a value the
+        # platform actually understands. Anything else (e.g. an ATS's own
+        # function taxonomy) must fall through to the S&T filter — otherwise a
+        # scraper that innocently passes its board's category string silently
+        # disables S&T filtering for that whole bank.
+        category = _valid_category(o.category) or is_snt_role(title, desc)
         if not category:
             continue
         if not in_europe(o.location or ""):
@@ -230,6 +262,7 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
                 active_by_bank[bank] = active_by_bank.get(bank, 0) + 1
 
         suspect_zero: list[str] = []
+        suspect_detail: list[dict] = []
         trusted_banks: set[str] = set()
         for bank in scraped_banks:
             kept = kept_by_bank.get(bank, 0)
@@ -240,6 +273,14 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
                 state.zero_streak += 1
                 if state.zero_streak < 2:
                     suspect_zero.append(bank)
+                    suspect_detail.append({
+                        "bank": bank,
+                        "reason": (
+                            f"scraped OK but kept 0 offers while "
+                            f"{active_by_bank.get(bank, 0)} are still active — "
+                            f"deactivation held (zero-streak {state.zero_streak}/2)"
+                        ),
+                    })
                     logger.warning(
                         "persist: %s returned 0 offers but has %d active — "
                         "holding deactivation (zero-streak %d/2)",
@@ -283,6 +324,7 @@ def persist(scraped: list[ScrapedOffer], scraped_banks: Optional[set[str]] = Non
         "removed": len(removed_offers) if 'removed_offers' in locals() else 0,
         "scraped_banks": sorted(scraped_banks),
         "suspect_zero": sorted(suspect_zero) if 'suspect_zero' in locals() else [],
+        "suspect_detail": suspect_detail if 'suspect_detail' in locals() else [],
         "total_kept_after_filter": len(scraped),
     }
 
@@ -304,6 +346,9 @@ async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
         "inserted": 0, "updated": 0, "removed": 0,
         "total_kept_after_filter": 0, "scraped_banks": [], "failed": [],
         "suspect_zero": [], "done": 0, "total": total,
+        # Parallel to failed/suspect_zero, but carrying the "why" for each bank
+        # so the UI's health badge can explain itself on hover.
+        "failed_detail": [], "suspect_detail": [],
     }
 
     def report():
@@ -316,7 +361,7 @@ async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
     report()
     tasks = [asyncio.ensure_future(_run_one(s)) for s in scrapers]
     for fut in asyncio.as_completed(tasks):
-        bank, ok, offers = await fut
+        bank, ok, offers, reason = await fut
         if ok:
             try:
                 # persist() is synchronous (DB writes); run it off the event loop.
@@ -330,14 +375,20 @@ async def refresh_all(scrapers: list[BankScraper], progress=None) -> dict:
                 agg["total_kept_after_filter"] += res["total_kept_after_filter"]
                 agg["scraped_banks"].append(bank)
                 agg["suspect_zero"].extend(res.get("suspect_zero") or [])
+                agg["suspect_detail"].extend(res.get("suspect_detail") or [])
             except Exception as e:
                 logger.exception("persist failed for %s: %s", bank, e)
                 agg["failed"].append(bank)
+                agg["failed_detail"].append(
+                    {"bank": bank, "reason": f"scraped OK but saving failed — {_reason(e)}"})
         else:
             agg["failed"].append(bank)
+            agg["failed_detail"].append({"bank": bank, "reason": reason or "scraper errored"})
         agg["done"] += 1
         report()
 
     agg["scraped_banks"].sort()
     agg["failed"].sort()
+    agg["failed_detail"].sort(key=lambda d: d["bank"])
+    agg["suspect_detail"].sort(key=lambda d: d["bank"])
     return agg

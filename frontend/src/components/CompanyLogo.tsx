@@ -2,13 +2,13 @@ import { useState } from 'react'
 import { bankMeta, logoSources } from '../lib/bankMeta'
 
 // Company mark: the real logo on a light chip (so any logo reads on the dark
-// theme). Tries each logo source in turn (DuckDuckGo → Google favicon), then
-// falls back to a brand-colored monogram if none load.
+// theme). Tries each logo source in turn (explicit override → DuckDuckGo →
+// Google favicon), then falls back to a brand-colored monogram if none load.
 export default function CompanyLogo({
   bank, size = 38, rounded = 11,
 }: { bank: string; size?: number; rounded?: number }) {
   const m = bankMeta(bank)
-  const sources = logoSources(m.domain)
+  const sources = logoSources(m)
   const [idx, setIdx] = useState(0)
   const showImg = idx < sources.length
 

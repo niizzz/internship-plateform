@@ -19,14 +19,19 @@ export default function OffersPage() {
   const [country, setCountry] = useState('')
   const [status, setStatus] = useState<string>('')
   const [search, setSearch] = useState('')
+  const [startYear, setStartYear] = useState('')
 
   const { data: offers = [], isLoading } = useQuery({
-    queryKey: ['offers', { bank, category, country, status, search }],
-    queryFn: () => api.listOffers({ bank, category, country, status, search }),
+    queryKey: ['offers', { bank, category, country, status, search, startYear }],
+    queryFn: () => api.listOffers({ bank, category, country, status, search, start_year: startYear }),
   })
   const { data: stats } = useQuery({ queryKey: ['stats'], queryFn: api.stats })
 
   const banks = useMemo(() => Object.keys(stats?.by_bank ?? {}).sort(), [stats])
+  const startYears = useMemo(
+    () => Object.keys(stats?.by_start_year ?? {}).filter(y => y !== 'unknown').sort(),
+    [stats]
+  )
   const countries = useMemo(
     () => Array.from(new Set(offers.map(o => o.country).filter(Boolean))).sort(),
     [offers]
@@ -59,6 +64,7 @@ export default function OffersPage() {
           category={category} setCategory={setCategory}
           country={country} setCountry={setCountry} countries={countries}
           status={status} setStatus={setStatus}
+          startYear={startYear} setStartYear={setStartYear} startYears={startYears}
         />
 
         {isLoading ? (
@@ -84,7 +90,7 @@ function FilterBar(props: any) {
   return (
     <div className="bg-ink-900/60 border border-ink-700 rounded-xl p-3 mb-5 flex flex-wrap gap-2 items-center backdrop-blur">
       <input
-        placeholder="Search title or location…"
+        placeholder="Search title, bank, location, start date…"
         value={props.search} onChange={e => props.setSearch(e.target.value)}
         className={`${inp} flex-1 min-w-[220px]`}
       />
@@ -102,6 +108,10 @@ function FilterBar(props: any) {
       <select value={props.country} onChange={e => props.setCountry(e.target.value)} className={inp}>
         <option value="">All countries</option>
         {props.countries.map((c: string) => <option key={c}>{c}</option>)}
+      </select>
+      <select value={props.startYear} onChange={e => props.setStartYear(e.target.value)} className={inp}>
+        <option value="">Any start year</option>
+        {props.startYears.map((y: string) => <option key={y} value={y}>Starts {y}</option>)}
       </select>
       <select value={props.status} onChange={e => props.setStatus(e.target.value)} className={inp}>
         <option value="">Any status</option>

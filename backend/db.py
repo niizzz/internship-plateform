@@ -85,6 +85,55 @@ class Offer(SQLModel, table=True):
     first_seen_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = Field(default=True, index=True)
+    # Set once the offer went out in a new-items email digest (notifier.py).
+    emailed_at: Optional[datetime] = None
+
+
+class EventRegStatus(str, Enum):
+    not_registered = "not_registered"
+    registered = "registered"
+    attended = "attended"
+    skipped = "skipped"
+
+
+class RecruitingEvent(SQLModel, table=True):
+    """A recruiting / networking event a bank publishes (insight evenings,
+    desk info sessions, trading challenges, campus presentations). Scraped by
+    scrapers/events.py, or added by hand (`manual`). Registration itself is a
+    link out to the bank's own form: the platform never registers for you."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    bank: str = Field(index=True)
+    external_id: str = Field(index=True)
+    title: str
+    event_type: str = "event"          # insight | info_session | networking | workshop | competition | event
+    relevance: str = Field(default="general", index=True)  # markets | general | other
+    division: Optional[str] = None
+    is_virtual: bool = False
+    location: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    school: Optional[str] = None       # set when the event is for one university's students
+    # Wall-clock time AT THE EVENT (naive), labelled by `timezone` ("BST",
+    # "Europe/London", ...). Sources disagree on zones and several give none,
+    # so converting to UTC would invent precision; display is "as published".
+    starts_at: Optional[datetime] = Field(default=None, index=True)
+    ends_at: Optional[datetime] = None
+    all_day: bool = False              # source gives a date but no time
+    timezone: Optional[str] = None
+    registration_deadline: Optional[datetime] = None
+    # False when the source says sign-up has closed (JPM drops the signup link).
+    registration_open: bool = True
+    register_url: str                  # sign-up form, else the bank's events page
+    source_url: Optional[str] = None
+    description: Optional[str] = None
+    manual: bool = False
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = Field(default=True, index=True)
+    hidden: bool = False               # user dismissed it
+    reg_status: EventRegStatus = Field(default=EventRegStatus.not_registered)
+    notes: Optional[str] = None
+    emailed_at: Optional[datetime] = None
 
 
 class Application(SQLModel, table=True):
@@ -94,6 +143,21 @@ class Application(SQLModel, table=True):
     notes: Optional[str] = None
     applied_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ApplicationEvent(SQLModel, table=True):
+    """One row per application status transition — the pipeline timeline.
+
+    Application stores only the CURRENT status, so "when did this become an
+    interview?" and "how long has it sat in OA?" were unanswerable; updated_at
+    is overwritten by every notes edit, so it cannot stand in. Events are
+    append-only and never rewritten.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    offer_id: int = Field(foreign_key="offer.id", index=True)
+    from_status: Optional[ApplicationStatus] = None
+    to_status: ApplicationStatus
+    at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class TailoredDocument(SQLModel, table=True):
@@ -159,6 +223,154 @@ class Settings(SQLModel, table=True):
     # Miscellaneous documents (certificates, transcripts, ...) offered to
     # "other document" file inputs during assisted apply: [{"label", "path"}]
     extra_documents: list = Field(default_factory=list, sa_column=Column(JSON))
+    # --- Automation: daily refresh + new-item email digest ----------------
+    auto_refresh: bool = True
+    auto_refresh_hours: int = 24
+    email_notifications: bool = False
+    notify_email: Optional[str] = None   # the ONLY recipient notifier.py ever sends to
+    smtp_host: Optional[str] = "smtp.gmail.com"
+    smtp_port: Optional[int] = 465
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None  # app password; never returned by the API
+    # Items first seen before this are never emailed (no backlog blast when
+    # notifications are switched on).
+    notify_since: Optional[datetime] = None
+
+
+class ContactType(str, Enum):
+    """Who the person is relative to the candidate — drives how a draft opens.
+    Ordered by observed reply rate: alumni and current interns answer, seniors
+    mostly do not."""
+    alumni = "alumni"        # same school — the warmest opener available
+    intern = "intern"        # doing/just did an internship at the target firm
+    junior = "junior"        # analyst / associate on the desk
+    recruiter = "recruiter"  # campus recruiting / HR
+    senior = "senior"        # VP / MD / desk head
+
+
+class OutreachStatus(str, Enum):
+    to_contact = "to_contact"
+    sent = "sent"
+    replied = "replied"
+    call_booked = "call_booked"
+    referred = "referred"      # they put your name forward — the win condition
+    closed = "closed"          # dead: declined, or gone silent past the cadence
+
+
+class Channel(str, Enum):
+    """Where the message goes. Changes the format, not just the transport: an
+    email gets a subject line and a little more room, a LinkedIn note gets 300
+    characters and no greeting."""
+    linkedin = "linkedin"
+    email = "email"
+
+
+class AskType(str, Enum):
+    """What the message actually asks for. Orthogonal to format, and the single
+    biggest driver of whether it lands."""
+    chat = "chat"          # informational: their desk, their path, their old role
+    referral = "referral"  # put my CV forward for a specific role
+
+
+class MessageKind(str, Enum):
+    connection_note = "connection_note"  # attached to a connect request, 300 chars
+    dm = "dm"                            # message once connected, or InMail
+    followup = "followup"
+    thank_you = "thank_you"
+
+
+# LinkedIn truncates a connection-request note at 300 characters. Drafts that
+# overrun are regenerated shorter rather than silently cut mid-sentence.
+CONNECTION_NOTE_MAX = 300
+
+
+class Contact(SQLModel, table=True):
+    """One person to reach out to. Deliberately NOT scraped: LinkedIn's User
+    Agreement forbids automated access, so rows are entered by hand (or from a
+    profile the user is already looking at). The automation here is drafting,
+    tracking and follow-up timing — never sending."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    full_name: str
+    bank: str = Field(index=True)
+    role_title: Optional[str] = None
+    desk: Optional[str] = None           # "Structured Equity Derivatives", "FICC"
+    location: Optional[str] = None
+    contact_type: ContactType = Field(default=ContactType.junior, index=True)
+    linkedin_url: Optional[str] = None
+    # Confirmed address: shared by the person (LinkedIn export) or typed by the
+    # user. This is the ONLY field the send links and channel:auto ever use.
+    email: Optional[str] = None
+    # Derived from the employer's mail format. A GUESS: never sent to on its
+    # own, the user promotes it into `email` explicitly if they trust it.
+    email_guess: Optional[str] = None
+    email_guess_confidence: Optional[str] = None   # known | likely
+    # True when they are already a 1st-degree connection (everyone promoted
+    # from the LinkedIn import). You cannot send a connection REQUEST to
+    # someone you are already connected to, so this drives the default message
+    # kind and hides the connection-note option for them.
+    is_connection: bool = Field(default=False)
+    school: Optional[str] = None         # set when the tie is alumni
+    grad_year: Optional[str] = None
+    # Free text: the honest, specific reason to write to THIS person. The single
+    # biggest driver of reply rate, and the one thing a model cannot invent.
+    shared_context: Optional[str] = None
+    offer_id: Optional[int] = Field(default=None, foreign_key="offer.id", index=True)
+    status: OutreachStatus = Field(default=OutreachStatus.to_contact, index=True)
+    notes: Optional[str] = None
+    last_sent_at: Optional[datetime] = None
+    next_followup_at: Optional[datetime] = Field(default=None, index=True)
+    replied_at: Optional[datetime] = None
+    followup_count: int = Field(default=0)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OutreachMessage(SQLModel, table=True):
+    """A drafted message. Rows are created by the drafter and edited by the user;
+    sent_at is set only when the user confirms they actually sent it by hand."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    contact_id: int = Field(foreign_key="contact.id", index=True)
+    kind: MessageKind = Field(default=MessageKind.connection_note)
+    channel: Channel = Field(default=Channel.linkedin)
+    ask_type: AskType = Field(default=AskType.chat)
+    subject: Optional[str] = None   # email only; LinkedIn messages have none
+    body: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    sent_at: Optional[datetime] = None
+    edited: bool = Field(default=False)  # user changed the draft before sending
+
+
+class ConnectionSuggestion(SQLModel, table=True):
+    """A person from the user's own LinkedIn data export who looks worth writing
+    to. Populated by linkedin_import from Connections.csv (LinkedIn's official
+    "get a copy of your data"), never by scraping.
+
+    Only rows that matched a known finance employer AND a front-office markets
+    role are stored: the rest of the network is irrelevant to this hunt, and
+    keeping third-party contact details that serve no purpose is not worth the
+    privacy cost. Re-importing re-derives everything, so nothing is lost.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    full_name: str
+    linkedin_url: Optional[str] = Field(default=None, index=True)
+    email: Optional[str] = None                    # shared by them, in the export
+    # Derived from the employer's mail format. A GUESS: never sent to on its
+    # own, the user promotes it into `email` explicitly if they trust it.
+    email_guess: Optional[str] = None
+    email_guess_confidence: Optional[str] = None   # known | likely
+    company_raw: str                 # employer exactly as the export spells it
+    bank: str = Field(index=True)    # canonical name it resolved to
+    employer_tier: str               # target_bank | other_ib | market_maker
+    position: str
+    category: str                    # sales | trading | structuring | markets
+    seniority: str                   # maps onto ContactType
+    score: int = Field(default=0, index=True)
+    reasons: list = Field(default_factory=list, sa_column=Column(JSON))
+    connected_on: Optional[str] = None
+    dismissed: bool = Field(default=False, index=True)
+    # Set once turned into a Contact, so a person is never suggested twice.
+    contact_id: Optional[int] = Field(default=None, foreign_key="contact.id")
+    imported_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # Columns added after the initial schema. SQLModel.metadata.create_all() will only create
@@ -186,6 +398,15 @@ _SETTINGS_NEW_COLUMNS = [
     ("languages", "TEXT"),
     ("extras_json", "JSON"),
     ("extra_documents", "JSON"),
+    ("auto_refresh", "BOOLEAN DEFAULT 1"),
+    ("auto_refresh_hours", "INTEGER DEFAULT 24"),
+    ("email_notifications", "BOOLEAN DEFAULT 0"),
+    ("notify_email", "TEXT"),
+    ("smtp_host", "TEXT DEFAULT 'smtp.gmail.com'"),
+    ("smtp_port", "INTEGER DEFAULT 465"),
+    ("smtp_user", "TEXT"),
+    ("smtp_password", "TEXT"),
+    ("notify_since", "DATETIME"),
 ]
 
 
@@ -200,12 +421,45 @@ def _migrate_offer(conn) -> None:
     cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(offer)").fetchall()}
     if "posted_at" not in cols:
         conn.exec_driver_sql('ALTER TABLE offer ADD COLUMN "posted_at" DATETIME')
+    if "emailed_at" not in cols:
+        conn.exec_driver_sql('ALTER TABLE offer ADD COLUMN "emailed_at" DATETIME')
 
 
 def _migrate_tailoreddocument(conn) -> None:
     cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(tailoreddocument)").fetchall()}
     if "fingerprint" not in cols:
         conn.exec_driver_sql('ALTER TABLE tailoreddocument ADD COLUMN "fingerprint" TEXT')
+
+
+def _migrate_email_guesses(conn) -> None:
+    """Guessed work addresses, added after both tables shipped."""
+    for table in ("contact", "connectionsuggestion"):
+        cols = {r[1] for r in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
+        for name in ("email_guess", "email_guess_confidence"):
+            if name not in cols:
+                conn.exec_driver_sql(f'ALTER TABLE {table} ADD COLUMN "{name}" TEXT')
+    cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(contact)").fetchall()}
+    if "is_connection" not in cols:
+        conn.exec_driver_sql(
+            'ALTER TABLE contact ADD COLUMN "is_connection" BOOLEAN DEFAULT 0')
+        # Rows already promoted from the import are, by definition, connections.
+        conn.exec_driver_sql(
+            "UPDATE contact SET is_connection=1 "
+            "WHERE shared_context LIKE '%first-degree LinkedIn connection%'")
+
+
+def _migrate_outreachmessage(conn) -> None:
+    cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(outreachmessage)").fetchall()}
+    # Defaults match the pre-channel behaviour: everything drafted before this
+    # was a LinkedIn message asking for a chat.
+    for name, sqltype, default in (
+        ("channel", "TEXT", "'linkedin'"),
+        ("ask_type", "TEXT", "'chat'"),
+        ("subject", "TEXT", "NULL"),
+    ):
+        if name not in cols:
+            conn.exec_driver_sql(
+                f'ALTER TABLE outreachmessage ADD COLUMN "{name}" {sqltype} DEFAULT {default}')
 
 
 def _data_fixes(conn) -> None:
@@ -224,6 +478,26 @@ def _data_fixes(conn) -> None:
         import logging
         logging.getLogger(__name__).warning(
             "could not create unique offer index (duplicate rows present?)")
+    conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_event_bank_external "
+        "ON recruitingevent(bank, external_id)")
+
+
+def _backfill_application_events(conn) -> None:
+    """Seed one event for applications that predate the events table.
+
+    Their true transition history is unrecoverable, so record a single entry
+    into the current status, dated from applied_at (falling back to
+    updated_at). Only runs for applications with no events at all, so it can
+    never duplicate or overwrite real history.
+    """
+    conn.exec_driver_sql("""
+        INSERT INTO applicationevent (offer_id, from_status, to_status, at)
+        SELECT a.offer_id, NULL, a.status, COALESCE(a.applied_at, a.updated_at)
+        FROM application a
+        WHERE a.status != 'not_applied'
+          AND NOT EXISTS (SELECT 1 FROM applicationevent e WHERE e.offer_id = a.offer_id)
+    """)
 
 
 def init_db() -> None:
@@ -232,7 +506,10 @@ def init_db() -> None:
         _migrate_settings(conn)
         _migrate_offer(conn)
         _migrate_tailoreddocument(conn)
+        _migrate_outreachmessage(conn)
+        _migrate_email_guesses(conn)
         _data_fixes(conn)
+        _backfill_application_events(conn)
     # Ensure single Settings row exists.
     with Session(ENGINE) as s:
         if not s.get(Settings, 1):
