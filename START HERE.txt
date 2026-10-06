@@ -1,0 +1,57 @@
+INTERNSHIP PLATEFORM - HOW TO START
+
+First, unzip the folder somewhere normal (Desktop or Documents).
+Don't run anything from inside the zip.
+
+======================================================================
+ MAC
+======================================================================
+
+1. Open the Terminal app (Cmd+Space, type "Terminal", Enter).
+
+2. Type   bash   followed by ONE space (don't press Enter yet),
+   then drag the file  "Start (Mac).command"  from the folder into the
+   Terminal window, and press Enter.
+
+   (Double-clicking the file also works, but macOS usually blocks
+   downloaded scripts the first time: if it says it "cannot be opened"
+   or "could not verify", go to System Settings > Privacy & Security,
+   scroll down and click "Open Anyway". The Terminal way above avoids that.)
+
+3. The FIRST time, it installs everything it needs (Python, Node.js,
+   packages, a browser for scraping) - 3 to 10 minutes, no password
+   needed. Leave the window open.
+
+4. The platform opens in your browser at http://localhost:5173
+
+Next times: same step 2 (or double-click the file). It starts in seconds.
+KEEP THE TERMINAL WINDOW OPEN while you use it - closing it stops the platform.
+
+======================================================================
+ WINDOWS
+======================================================================
+
+1. Double-click  launch.bat
+   The first time, a setup window installs everything (3-10 minutes).
+   If Windows asks for permission to install Node.js, click Yes.
+2. The platform opens in your browser at http://localhost:5173
+Two small minimized windows ("Internship DB - backend/frontend") must stay
+open while you use it.
+
+======================================================================
+ BOTH
+======================================================================
+
+- It starts EMPTY: about 1 minute after launch it scrapes all 28 banks by
+  itself (takes ~2 minutes), and offers appear as each bank finishes.
+  You can also click REFRESH in the top-right at any time.
+- CV / cover-letter tailoring needs the Claude Code CLI installed and logged
+  in. Then: Settings > upload your CV, and fill in your Profile.
+- BNP Paribas offers need Google Chrome installed (a Chrome window may
+  flash briefly during the scrape - that's normal).
+
+IF SOMETHING GOES WRONG
+- Screenshot the Terminal window (Mac) or the "Internship DB - backend"
+  window (Windows) and send it over.
+- To redo the setup from scratch, delete the folder  backend/.venv
+  and start again.

@@ -139,14 +139,21 @@ class WorkdayScraper(BankScraper):
     async def _search(self, client: httpx.AsyncClient, site: str, kw: str,
                       offers: dict[str, ScrapedOffer]) -> None:
         api = f"https://{self.wd_host}/wday/cxs/{self.tenant}/{site}/jobs"
-        offset = 0
+        offset, total, seen = 0, None, set()
         for _ in range(self.max_pages):
             body = {"appliedFacets": {}, "limit": self.page_size, "offset": offset, "searchText": kw}
             r = await client.post(api, json=body)
             r.raise_for_status()
-            posts = r.json().get("jobPostings", []) or []
-            if not posts:
+            data = r.json()
+            posts = data.get("jobPostings", []) or []
+            # Past the end Workday wraps around to page 1 (and sends `total`
+            # on page 1 only): stop at total or on a page with nothing new.
+            if total is None:
+                total = data.get("total") or 0
+            paths = {p.get("externalPath") for p in posts}
+            if not posts or paths <= seen:
                 break
+            seen |= paths
             for p in posts:
                 path = p.get("externalPath") or ""
                 ext = path.rsplit("_", 1)[-1] if "_" in path else path
@@ -169,7 +176,7 @@ class WorkdayScraper(BankScraper):
                     extras={"external_path": path, "site": site},
                 )
             offset += self.page_size
-            if len(posts) < self.page_size:
+            if len(posts) < self.page_size or (total and offset >= total):
                 break
             await asyncio.sleep(0.4)
 
@@ -178,7 +185,7 @@ class WorkdayScraper(BankScraper):
         """Paginate one site's European subset via the country facet (no keyword
         search) — the whole result set is already Europe-bounded and small."""
         api = f"https://{self.wd_host}/wday/cxs/{self.tenant}/{site}/jobs"
-        offset = 0
+        offset, total, seen = 0, None, set()
         for _ in range(self.max_pages):
             body = {
                 "appliedFacets": {self.country_facet: self.europe_country_ids},
@@ -188,9 +195,16 @@ class WorkdayScraper(BankScraper):
             }
             r = await client.post(api, json=body)
             r.raise_for_status()
-            posts = r.json().get("jobPostings", []) or []
-            if not posts:
+            data = r.json()
+            posts = data.get("jobPostings", []) or []
+            # Past the end Workday wraps around to page 1 (and sends `total`
+            # on page 1 only): stop at total or on a page with nothing new.
+            if total is None:
+                total = data.get("total") or 0
+            paths = {p.get("externalPath") for p in posts}
+            if not posts or paths <= seen:
                 break
+            seen |= paths
             for p in posts:
                 path = p.get("externalPath") or ""
                 ext = path.rsplit("_", 1)[-1] if "_" in path else path
@@ -207,7 +221,7 @@ class WorkdayScraper(BankScraper):
                     extras={"external_path": path, "site": site},
                 )
             offset += self.page_size
-            if len(posts) < self.page_size:
+            if len(posts) < self.page_size or (total and offset >= total):
                 break
             await asyncio.sleep(0.4)
 

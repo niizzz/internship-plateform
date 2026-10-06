@@ -80,7 +80,7 @@ class UBSScraper(BankScraper):
             logger.warning("UBS: enrich cap hit — %d early-careers offers left without "
                            "descriptions", len(eligible) - len(to_enrich))
         if to_enrich:
-            await self._enrich(to_enrich)
+            await self.enrich_within_budget(self._enrich(to_enrich))
 
         logger.info("UBS: collected %d candidate offers across %d board(s) (%d enriched)",
                     len(offers), len(SITE_IDS) - len(failures), len(to_enrich))

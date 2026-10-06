@@ -145,7 +145,7 @@ class SocGenScraper(BankScraper):
         if len(eligible) > len(to_enrich):
             logger.warning("SocGen: enrich cap hit — %d of %d early-careers offers "
                            "left without descriptions", len(eligible) - len(to_enrich), len(eligible))
-        await self._enrich(to_enrich)
+        await self.enrich_within_budget(self._enrich(to_enrich))
 
         logger.info("Société Générale: collected %d offers (%d enriched)", len(offers), len(to_enrich))
         return list(offers.values())

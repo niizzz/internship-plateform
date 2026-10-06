@@ -9,7 +9,9 @@ export default function RefreshButton() {
   const { data: status } = useQuery({
     queryKey: ['refreshStatus'],
     queryFn: api.refreshStatus,
-    refetchInterval: polling ? 2000 : false,
+    // Also poll while the backend reports a run we didn't start (the 24h
+    // auto-refresh), otherwise the label freezes at the first count it saw.
+    refetchInterval: q => (polling || q.state.data?.status === 'running') ? 2000 : false,
   })
 
   const trigger = useMutation({

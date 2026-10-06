@@ -7,6 +7,16 @@ Owner: Nizar (user's spelling "plateform" is intentional).
 
 ## Run / verify
 
+- Fresh PC: `launch.bat` runs `setup.bat` until `backend/.venv/.setup-ok`
+  exists (winget-installs Python 3.14 + Node LTS if missing, venv, pinned
+  pip install, playwright chromium, `npm ci`). `backend/requirements.txt` is
+  an EXACT pip freeze — keep it pinned: an unpinned install pulled sqlmodel
+  0.0.47, which rejects naive datetimes, so every offer failed to save on a
+  friend's machine. Re-freeze after any deliberate upgrade.
+- macOS: `Start (Mac).command` (LF endings, exec bit) = setup + launch in one;
+  Python 3.14 via `uv` (no sudo/Homebrew), Node into `.tools/node`. pywin32 is
+  marker-gated to win32. Pinned wheels verified to exist for cp314 macOS
+  arm64 + x86_64 (opencv needs macOS 14+ on Intel). Not yet run on a real Mac.
 - One-click: `launch.bat` (backend uvicorn on 127.0.0.1:8000, Vite on :5173).
   NB `timeout /t` inside the .bat breaks under non-interactive shells — start
   the two processes yourself if driving from an agent shell.

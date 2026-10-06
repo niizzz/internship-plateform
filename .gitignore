@@ -20,3 +20,6 @@ backend/debug_lazard/
 
 # Claude Code local settings (any depth)
 **/.claude/settings.local.json
+
+# Node.js downloaded by Start (Mac).command
+.tools/

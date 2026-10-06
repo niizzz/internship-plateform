@@ -93,6 +93,7 @@ async def _run_one(scraper: BankScraper) -> tuple[str, bool, list[ScrapedOffer],
     """
     try:
         async with scraper:
+            scraper.deadline = asyncio.get_running_loop().time() + SCRAPER_TIMEOUT_S
             offers = await asyncio.wait_for(scraper.scrape(), timeout=SCRAPER_TIMEOUT_S)
             logger.info("Scraper %s returned %d offers", scraper.bank_name, len(offers))
             return scraper.bank_name, True, offers, None

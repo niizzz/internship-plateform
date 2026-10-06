@@ -117,11 +117,14 @@ def _claude_exe() -> str:
     exe = shutil.which("claude")
     if exe:
         return exe
-    fallback = Path.home() / ".local" / "bin" / "claude.exe"
-    if fallback.exists():
-        return str(fallback)
+    # The native installer puts it in ~/.local/bin, which a GUI-launched
+    # backend's PATH often lacks (claude.exe on Windows, claude on macOS).
+    for name in ("claude.exe", "claude"):
+        fallback = Path.home() / ".local" / "bin" / name
+        if fallback.exists():
+            return str(fallback)
     raise ClaudeCliError(
-        "Claude Code CLI not found. Install it or add it to PATH (expected at ~/.local/bin/claude.exe)."
+        "Claude Code CLI not found. Install it or add it to PATH (expected in ~/.local/bin)."
     )
 
 

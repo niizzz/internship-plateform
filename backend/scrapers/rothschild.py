@@ -51,7 +51,7 @@ class RothschildScraper(BankScraper):
     async def scrape(self) -> list[ScrapedOffer]:
         offers: dict[str, ScrapedOffer] = {}
         async with httpx.AsyncClient(timeout=30, headers=HEADERS) as client:
-            offset = 0
+            offset, total, seen = 0, None, set()
             while True:
                 body = {"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""}
                 try:
@@ -64,8 +64,15 @@ class RothschildScraper(BankScraper):
                     logger.warning("Rothschild offset=%d failed (partial results kept): %s", offset, e)
                     break
                 postings = data.get("jobPostings") or []
-                if not postings:
+                # Workday reports `total` on the first page only (0 after) and,
+                # past the end, WRAPS AROUND to page 1 instead of returning [] —
+                # so stop at total, and on a page with nothing new.
+                if total is None:
+                    total = data.get("total") or 0
+                paths = {p.get("externalPath") for p in postings}
+                if not postings or paths <= seen:
                     break
+                seen |= paths
                 for p in postings:
                     loc = p.get("locationsText") or ""
                     if not _looks_eu(loc):
@@ -84,7 +91,7 @@ class RothschildScraper(BankScraper):
                         extras={"external_path": ext_path},
                     )
                 offset += PAGE_SIZE
-                if len(postings) < PAGE_SIZE:
+                if len(postings) < PAGE_SIZE or (total and offset >= total):
                     break
                 await asyncio.sleep(0.4)
             # Enrich only likely early-careers roles (Stage / Alternance / intern).

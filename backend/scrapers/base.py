@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html as _htmllib
 import logging
 import re
@@ -98,6 +99,30 @@ class BankScraper:
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
+        # Loop-time deadline set by the orchestrator (None = no budget, e.g. a
+        # scraper run by hand). See enrich_within_budget.
+        self.deadline: Optional[float] = None
+
+    # Seconds kept back after an enrich pass for the scraper to return and
+    # close its browser before the orchestrator's hard timeout fires.
+    ENRICH_MARGIN_S = 10
+
+    async def enrich_within_budget(self, coro) -> None:
+        """Run a description-enrich pass, cut short at the scraper's deadline.
+
+        Enrich passes fill descriptions IN PLACE on offers already collected, so
+        stopping one early loses only the unfinished descriptions. Without this
+        a slow enrich tail made the orchestrator's timeout discard the bank's
+        whole listing (UBS / SocGen on busy refreshes)."""
+        if self.deadline is None:
+            await coro
+            return
+        remaining = self.deadline - asyncio.get_running_loop().time() - self.ENRICH_MARGIN_S
+        try:
+            await asyncio.wait_for(coro, timeout=max(remaining, 1))
+        except asyncio.TimeoutError:
+            logger.warning("%s: enrich stopped at the time budget — partial results kept "
+                           "(some descriptions missing)", self.bank_name)
 
     async def __aenter__(self):
         # Playwright is started lazily on first new_page() call so HTTP-only

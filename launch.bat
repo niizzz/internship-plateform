@@ -3,16 +3,23 @@ rem One-click launcher: starts backend + frontend if not already running, opens 
 setlocal
 set "ROOT=%~dp0"
 
+rem --- First launch on this PC: install everything (see setup.bat) ---
+if not exist "%ROOT%backend\.venv\.setup-ok" (
+    call "%ROOT%setup.bat"
+    if errorlevel 1 exit /b 1
+)
+if exist "%ProgramFiles%\nodejs\npm.cmd" set "PATH=%ProgramFiles%\nodejs;%PATH%"
+
 rem --- Backend (port 8000) ---
 netstat -ano | findstr /R /C:":8000 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
-    start "Internship DB - backend" /min cmd /c "cd /d "%ROOT%backend" && .venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000"
+    start "Internship DB - backend" /min cmd /k "cd /d "%ROOT%backend" && .venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000"
 )
 
 rem --- Frontend (port 5173) ---
 netstat -ano | findstr /R /C:":5173 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
-    start "Internship DB - frontend" /min cmd /c "cd /d "%ROOT%frontend" && npm run dev"
+    start "Internship DB - frontend" /min cmd /k "cd /d "%ROOT%frontend" && npm run dev"
 )
 
 rem --- Wait until the frontend answers, then open the browser ---
